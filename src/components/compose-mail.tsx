@@ -88,9 +88,14 @@ export function ComposeMail() {
 
           const formattedOriginalBody = `\n\n--- Original Message ---\nFrom: ${replyingToMail.from}\nDate: ${replyingToMail.date}\nSubject: ${replyingToMail.subject}\n\n${replyingToMail.body || replyingToMail.snippet}`;
 
-          setValue("to", toEmail);
-          setValue("subject", draft.draftSubject);
-          setValue("body", `${draft.draftBody}${formattedOriginalBody}`);
+          // 분석 캐시 초기화하여 새로운 초안 분석 강제
+          lastAnalyzedRef.current = "";
+
+          setValue("to", toEmail, { shouldValidate: true });
+          setValue("subject", draft.draftSubject, { shouldValidate: true });
+          setValue("body", `${draft.draftBody}${formattedOriginalBody}`, {
+            shouldValidate: true,
+          });
         } catch (err) {
           console.error("Failed to generate draft:", err);
           // 실패 시 기본 수동 세팅 유지
@@ -101,9 +106,11 @@ export function ComposeMail() {
             : `Re: ${replyingToMail.subject}`;
           const formattedOriginalBody = `\n\n--- Original Message ---\nFrom: ${replyingToMail.from}\nDate: ${replyingToMail.date}\nSubject: ${replyingToMail.subject}\n\n${replyingToMail.body || replyingToMail.snippet}`;
 
-          setValue("to", toEmail);
-          setValue("subject", subject);
-          setValue("body", `안녕하세요,\n\n${formattedOriginalBody}`);
+          setValue("to", toEmail, { shouldValidate: true });
+          setValue("subject", subject, { shouldValidate: true });
+          setValue("body", `안녕하세요,\n\n${formattedOriginalBody}`, {
+            shouldValidate: true,
+          });
         } finally {
           setIsGeneratingDraft(false);
         }
@@ -141,13 +148,17 @@ export function ComposeMail() {
         // 이전 분석 내용과 동일하면 스킵
         if (contentKey === lastAnalyzedRef.current) return;
 
+        // 원본 메일 내용(--- Original Message --- 이하) 제외하고 새 본문만 추출
+        const cleanBody = data.body.split("--- Original Message ---")[0].trim();
+
+        console.log("Triggering Guardian analysis for:", data.subject);
         setIsAnalyzing(true);
         try {
           const result = await analyzeMailWithImprovedBody({
             to: data.to,
             cc: data.cc,
             subject: data.subject,
-            body: data.body,
+            body: cleanBody, // 분석 시에는 원본 메시지 제외
             hasAttachment,
           });
           setAnalysis(result);
@@ -194,7 +205,19 @@ export function ComposeMail() {
 
   const handleAutoFix = () => {
     if (analysis?.improvedBody) {
-      setValue("body", analysis.improvedBody);
+      const currentBody = watch("body");
+      const originalMsgMarker = "--- Original Message ---";
+      const parts = currentBody.split(originalMsgMarker);
+
+      if (parts.length > 1) {
+        // 원본 메일 내용이 있는 경우, 개선된 본문 + 원본 내용 결합
+        const newBody = `${analysis.improvedBody}\n\n${originalMsgMarker}${parts[1]}`;
+        setValue("body", newBody);
+      } else {
+        // 일반 메일인 경우 전체 교체
+        setValue("body", analysis.improvedBody);
+      }
+
       setShowReview(false);
       alert("AI의 제안에 따라 본문이 수정되었습니다.");
     }
