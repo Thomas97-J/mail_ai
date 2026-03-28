@@ -132,7 +132,7 @@ const attachmentKeywords = [
   "enclosed",
 ];
 
-const localAnalyze = (data: {
+const localAnalyzeFallback = (data: {
   to: string;
   cc?: string;
   subject: string;
@@ -237,6 +237,69 @@ const localAnalyze = (data: {
   };
 };
 
+const localAnalyzeDeterministic = (data: {
+  to: string;
+  cc?: string;
+  subject: string;
+  body: string;
+  hasAttachment: boolean;
+}): AnalysisResult => {
+  const errors: string[] = [];
+  const improvements: string[] = [];
+  const recommendedCCs: string[] = [];
+  let severity: Severity = "Green";
+
+  const toEmails = extractEmails(data.to);
+  if (toEmails.length === 0) {
+    errors.push("수신인(To) 이메일 형식을 확인해 주세요.");
+    severity = maxSeverity(severity, "Red");
+  }
+
+  const body = data.body.trim();
+  const lowerBody = body.toLowerCase();
+  const mentionedAttachment = attachmentKeywords.some((k) => lowerBody.includes(k));
+  if (mentionedAttachment && !data.hasAttachment) {
+    errors.push("본문에 첨부 언급이 있는데 첨부파일이 없습니다.");
+    severity = maxSeverity(severity, "Red");
+  }
+
+  const piiSignals: Array<{ re: RegExp; msg: string; sev: Severity }> = [
+    {
+      re: /\b\d{6}-?\d{7}\b/,
+      msg: "주민등록번호 형태가 감지되었습니다. 발송 전 마스킹을 권장합니다.",
+      sev: "Red",
+    },
+    {
+      re: /\b(?:\d[ -]*?){13,16}\b/,
+      msg: "카드번호로 보일 수 있는 숫자열이 감지되었습니다. 발송 전 확인/마스킹을 권장합니다.",
+      sev: "Yellow",
+    },
+    {
+      re: /(비밀번호|password|otp|인증번호|2fa|one[- ]time)/i,
+      msg: "비밀번호/인증정보로 해석될 수 있는 표현이 감지되었습니다. 공유 여부를 재확인해 주세요.",
+      sev: "Red",
+    },
+    {
+      re: /(계좌|account|routing|swift|iban)/i,
+      msg: "계좌/송금 관련 정보가 포함되어 있을 수 있습니다. 수신인/도메인을 재확인해 주세요.",
+      sev: "Yellow",
+    },
+  ];
+  for (const s of piiSignals) {
+    if (s.re.test(body)) {
+      errors.push(s.msg);
+      severity = maxSeverity(severity, s.sev);
+    }
+  }
+
+  return {
+    errors: uniqClean(errors),
+    improvements: uniqClean(improvements),
+    recommendedCCs,
+    severity,
+  };
+};
+
 const cache = new Map<string, { at: number; result: AnalysisResult }>();
 const inflight = new Map<string, Promise<AnalysisResult>>();
 const CACHE_TTL_MS = 30_000;
@@ -248,7 +311,8 @@ export const analyzeMail = async (data: {
   body: string;
   hasAttachment: boolean;
 }): Promise<AnalysisResult> => {
-  const local = localAnalyze(data);
+  const hasKey = Boolean(process.env.NEXT_PUBLIC_OPENAI_API_KEY);
+  const local = hasKey ? localAnalyzeDeterministic(data) : localAnalyzeFallback(data);
   const key = JSON.stringify({
     to: data.to,
     cc: data.cc ?? "",
@@ -371,19 +435,26 @@ export interface AnalysisWithImprovedBody extends AnalysisResult {
   improvedTitle: string;
 }
 
-type RewriteResult = { improvedBody: string; improvedTitle: string };
+type ImprovedDraftResult = AnalysisWithImprovedBody;
 
-const normalizeRewrite = (
+const normalizeAnalysisWithImprovedDraft = (
   value: unknown,
-  fallbackBody: string,
-  fallbackTitle: string,
-): RewriteResult => {
+  fallback: { subject: string; body: string },
+): ImprovedDraftResult => {
   const obj =
     value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+
+  const errors = uniqClean(Array.isArray(obj.errors) ? obj.errors : []);
+  const improvements = uniqClean(Array.isArray(obj.improvements) ? obj.improvements : []);
+  const recommendedCCs = uniqClean(
+    Array.isArray(obj.recommendedCCs) ? obj.recommendedCCs : [],
+  );
+  const severity = normalizeSeverity(obj.severity);
+
   const improvedBody =
     typeof obj.improvedBody === "string" && obj.improvedBody.trim()
       ? obj.improvedBody
-      : fallbackBody;
+      : fallback.body;
 
   const titleCandidate =
     (typeof obj.improvedTitle === "string" && obj.improvedTitle.trim()
@@ -392,15 +463,23 @@ const normalizeRewrite = (
     (typeof obj.improvedtitle === "string" && obj.improvedtitle.trim()
       ? obj.improvedtitle
       : undefined) ??
-    fallbackTitle;
+    fallback.subject;
 
-  const improvedTitle = titleCandidate.trim() || fallbackTitle;
-  return { improvedBody, improvedTitle };
+  const improvedTitle = titleCandidate.trim() || fallback.subject;
+
+  return {
+    errors,
+    improvements,
+    recommendedCCs,
+    severity,
+    improvedBody,
+    improvedTitle,
+  };
 };
 
-const rewriteCache = new Map<string, { at: number; result: RewriteResult }>();
-const rewriteInflight = new Map<string, Promise<RewriteResult>>();
-const REWRITE_CACHE_TTL_MS = 30_000;
+const improvedDraftCache = new Map<string, { at: number; result: ImprovedDraftResult }>();
+const improvedDraftInflight = new Map<string, Promise<ImprovedDraftResult>>();
+const IMPROVED_DRAFT_TTL_MS = 30_000;
 
 export const analyzeMailWithImprovedBody = async (data: {
   to: string;
@@ -409,107 +488,119 @@ export const analyzeMailWithImprovedBody = async (data: {
   body: string;
   hasAttachment: boolean;
 }): Promise<AnalysisWithImprovedBody> => {
-  const analysis = await analyzeMail(data);
   const fallbackTitle = data.subject;
+  const fallbackBody = data.body;
+  const fallback: AnalysisWithImprovedBody = {
+    ...(process.env.NEXT_PUBLIC_OPENAI_API_KEY
+      ? localAnalyzeDeterministic(data)
+      : localAnalyzeFallback(data)),
+    improvedBody: fallbackBody,
+    improvedTitle: fallbackTitle,
+  };
 
-  const rewriteKey = JSON.stringify({
+  const improvedKey = JSON.stringify({
     to: data.to,
     cc: data.cc ?? '',
     subject: data.subject,
     body: data.body,
+    hasAttachment: data.hasAttachment,
   });
 
-  const cached = rewriteCache.get(rewriteKey);
-  if (cached && Date.now() - cached.at < REWRITE_CACHE_TTL_MS) {
-    return {
-      ...analysis,
-      improvedBody: cached.result.improvedBody,
-      improvedTitle: cached.result.improvedTitle,
-    };
-  }
+  const cached = improvedDraftCache.get(improvedKey);
+  if (cached && Date.now() - cached.at < IMPROVED_DRAFT_TTL_MS) return cached.result;
 
-  const existing = rewriteInflight.get(rewriteKey);
-  if (existing) {
-    const rewrite = await existing;
-    return {
-      ...analysis,
-      improvedBody: rewrite.improvedBody,
-      improvedTitle: rewrite.improvedTitle,
-    };
-  }
+  const existing = improvedDraftInflight.get(improvedKey);
+  if (existing) return existing;
 
-  const run = (async (): Promise<RewriteResult> => {
+  const run = (async (): Promise<ImprovedDraftResult> => {
     if (!process.env.NEXT_PUBLIC_OPENAI_API_KEY) {
-      const result: RewriteResult = {
-        improvedBody: data.body,
-        improvedTitle: fallbackTitle,
-      };
-      rewriteCache.set(rewriteKey, { at: Date.now(), result });
+      const result = fallback;
+      improvedDraftCache.set(improvedKey, { at: Date.now(), result });
       return result;
     }
 
-    const model = process.env.NEXT_PUBLIC_OPENAI_MODEL || 'gpt-5.4-nano';
+    const model = process.env.NEXT_PUBLIC_OPENAI_MODEL || "gpt-5.4-nano";
 
     const system = [
-      "당신은 비즈니스 이메일 에디터입니다. 사용자의 본문을 '매너/명확성/협업 효율' 관점에서 개선합니다.",
-      '절대 새로운 사실을 추가하지 말고, 의미/수치/고유명사/일정은 보존합니다.',
-      '언어는 원문의 톤/언어(한국어/영어)를 유지합니다.',
-      '명령조/압박/책임 전가/무례한 표현은 완곡하고 전문적인 표현으로 바꿉니다.',
-      '가능하면 다음을 보강합니다: 목적, 요청사항, 기한/다음 액션, 감사/마무리 문장.',
-      '제목(improvedTitle)은 짧고 구체적으로(가능하면 60자 이내), 원문의 의미를 보존하며 개선합니다.',
-      '반드시 아래 JSON 형식만 출력합니다. 다른 텍스트는 금지합니다.',
-    ].join('\n');
+      "당신은 이메일 보안/매너 점검 + 자동 개선 초안 생성 에이전트입니다.",
+      "목표: (1) 위험 요소/개선 제안/추천 CC/위험도를 산출하고, (2) 제목/본문을 더 정중하고 명확하게 개선한 버전을 제공합니다.",
+      "반드시 아래 JSON 형식만 출력합니다. 설명/마크다운/추가 필드는 금지합니다.",
+      "recommendedCCs는 이메일 주소만 허용합니다. 본문/수신인/참조에 실제로 등장한 주소만 포함합니다. 추측 금지.",
+      "원문에 없는 사실/수치/약속/일정을 만들어내지 않습니다.",
+      "improvedTitle은 짧고 구체적으로(가능하면 60자 이내), 원문의 의미를 보존하며 개선합니다.",
+      "improvedBody는 원문의 언어(한국어/영어)를 유지하고, 명령조/압박/책임 전가/무례한 표현은 완곡하고 전문적으로 바꿉니다.",
+      "severity는 Red|Yellow|Green 중 하나만 사용합니다.",
+      "Red: 발송 전 수정/확인 없이는 위험. Yellow: 검토/개선 권장. Green: 큰 이슈 없음.",
+    ].join("\n");
 
     const user = [
-      '[컨텍스트]',
+      "[이메일 정보]",
       `수신인(To): ${data.to}`,
-      `참조(Cc): ${data.cc || '없음'}`,
+      `참조(Cc): ${data.cc || "없음"}`,
       `제목: ${data.subject}`,
-      `첨부파일 유무: ${data.hasAttachment ? '있음' : '없음'}`,
-      '',
-      '[원문 본문]',
-      data.body,
-      '',
-      '[출력 JSON 스키마]',
-      '{ "improvedTitle": string, "improvedBody": string }',
-    ].join('\n');
+      `본문: ${data.body}`,
+      `첨부파일 유무: ${data.hasAttachment ? "있음" : "없음"}`,
+      "",
+      "[출력 JSON 스키마]",
+      "{",
+      '  "errors": string[],',
+      '  "improvements": string[],',
+      '  "recommendedCCs": string[],',
+      '  "severity": "Red" | "Yellow" | "Green",',
+      '  "improvedTitle": string,',
+      '  "improvedBody": string',
+      "}",
+    ].join("\n");
 
     try {
       const response = await openai.chat.completions.create({
         model,
         messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
+          { role: "system", content: system },
+          { role: "user", content: user },
         ],
-        response_format: { type: 'json_object' },
+        response_format: { type: "json_object" },
         temperature: 0.2,
       });
 
-      const content = response.choices[0]?.message?.content ?? '';
+      const content = response.choices[0]?.message?.content ?? "";
       const parsed = safeJsonParse(content);
-      const normalized = normalizeRewrite(parsed, data.body, fallbackTitle);
-      rewriteCache.set(rewriteKey, { at: Date.now(), result: normalized });
-      return normalized;
-    } catch (error) {
-      console.error('AI Rewrite failed:', error);
-      const result: RewriteResult = {
-        improvedBody: data.body,
-        improvedTitle: fallbackTitle,
+      const llm = normalizeAnalysisWithImprovedDraft(parsed, {
+        subject: fallbackTitle,
+        body: fallbackBody,
+      });
+
+      const deterministic = localAnalyzeDeterministic(data);
+      const allowedCc = new Set(
+        extractEmails(`${data.to} ${data.cc ?? ""} ${data.subject} ${data.body}`),
+      );
+      const filteredRecommended = llm.recommendedCCs
+        .map((v) => v.toLowerCase().trim())
+        .filter((v) => allowedCc.has(v));
+
+      const merged: AnalysisWithImprovedBody = {
+        errors: uniqClean([...deterministic.errors, ...llm.errors]),
+        improvements: uniqClean([...deterministic.improvements, ...llm.improvements]),
+        recommendedCCs: uniqClean(filteredRecommended),
+        severity: maxSeverity(deterministic.severity, llm.severity),
+        improvedTitle: llm.improvedTitle,
+        improvedBody: llm.improvedBody,
       };
-      rewriteCache.set(rewriteKey, { at: Date.now(), result });
+
+      improvedDraftCache.set(improvedKey, { at: Date.now(), result: merged });
+      return merged;
+    } catch (error) {
+      console.error("AI improved draft failed:", error);
+      const result = fallback;
+      improvedDraftCache.set(improvedKey, { at: Date.now(), result });
       return result;
     } finally {
-      rewriteInflight.delete(rewriteKey);
+      improvedDraftInflight.delete(improvedKey);
     }
   })();
 
-  rewriteInflight.set(rewriteKey, run);
-  const rewrite = await run;
-  return {
-    ...analysis,
-    improvedBody: rewrite.improvedBody,
-    improvedTitle: rewrite.improvedTitle,
-  };
+  improvedDraftInflight.set(improvedKey, run);
+  return run;
 };
 
 export interface GhostWriterDraft {
