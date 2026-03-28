@@ -6,12 +6,18 @@ export interface MailAttachment {
   data: string; // Base64 encoded data
 }
 
+export interface LegacyMailAttachment {
+  filename: string;
+  mimeType: string;
+  contentBase64: string;
+}
+
 export interface SendMailParams {
   to: string;
   cc?: string;
   subject: string;
   body: string;
-  attachments?: MailAttachment[];
+  attachments?: Array<MailAttachment | LegacyMailAttachment>;
 }
 
 export const generateRawMime = (params: SendMailParams): string => {
@@ -29,10 +35,14 @@ export const generateRawMime = (params: SendMailParams): string => {
 
   if (params.attachments && params.attachments.length > 0) {
     params.attachments.forEach((attachment) => {
+      const contentType =
+        'contentType' in attachment ? attachment.contentType : attachment.mimeType;
+      const data = 'data' in attachment ? attachment.data : attachment.contentBase64;
+
       msg.addAttachment({
         filename: attachment.filename,
-        contentType: attachment.contentType,
-        data: attachment.data,
+        contentType,
+        data,
       });
     });
   }
