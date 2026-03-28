@@ -38,6 +38,12 @@ export interface MessageDetail {
   internalDate: string;
 }
 
+export interface ThreadDetail {
+  id: string;
+  historyId?: string;
+  messages: MessageDetail[];
+}
+
 export interface ParsedMail {
   id: string;
   threadId: string;
@@ -47,6 +53,10 @@ export interface ParsedMail {
   date: string;
   snippet: string;
   body: string;
+}
+
+export interface ParsedMailWithMeta extends ParsedMail {
+  internalDateMs: number;
 }
 
 export const fetchMessages = async (
@@ -71,6 +81,17 @@ export const fetchMessageDetail = async (
 ): Promise<MessageDetail> => {
   const response = await axios.get(`${GMAIL_API_BASE}/messages/${messageId}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  return response.data;
+};
+
+export const fetchThreadDetail = async (
+  accessToken: string,
+  threadId: string,
+): Promise<ThreadDetail> => {
+  const response = await axios.get(`${GMAIL_API_BASE}/threads/${threadId}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    params: { format: "full" },
   });
   return response.data;
 };
@@ -123,6 +144,19 @@ export const parseMessage = (message: MessageDetail): ParsedMail => {
     snippet: message.snippet,
     body: getBody(message.payload),
   };
+};
+
+export const parseMessageWithMeta = (message: MessageDetail): ParsedMailWithMeta => {
+  const parsed = parseMessage(message);
+  const internalDateMs = Number.parseInt(message.internalDate, 10);
+  return {
+    ...parsed,
+    internalDateMs: Number.isFinite(internalDateMs) ? internalDateMs : Date.now(),
+  };
+};
+
+export const parseThreadMessages = (thread: ThreadDetail): ParsedMailWithMeta[] => {
+  return thread.messages.map(parseMessageWithMeta).sort((a, b) => a.internalDateMs - b.internalDateMs);
 };
 
 export const sendMail = async (

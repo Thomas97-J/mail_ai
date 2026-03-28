@@ -646,3 +646,612 @@ export const ghostWriteReplyDraft = async (
   ghostInflight.set(key, run);
   return run;
 };
+
+export interface WatchdogTrackedMail {
+  threadId: string;
+  sentAtMs: number;
+  dueAtMs: number;
+  subject: string;
+  to: string;
+  from: string;
+  notifiedAtMs?: number;
+}
+
+export interface WatchdogReminderCandidate {
+  threadId: string;
+  dueAtMs: number;
+  subject: string;
+  to: string;
+  from: string;
+  reason: string;
+}
+
+type DeadlineParse = { dueAtMs: number; matchedText: string; confidence: "high" | "medium" | "low" };
+
+const startOfDayMs = (d: Date): number => {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x.getTime();
+};
+
+const endOfDayMs = (d: Date): number => {
+  const x = new Date(d);
+  x.setHours(23, 59, 59, 999);
+  return x.getTime();
+};
+
+const addDays = (d: Date, days: number): Date => {
+  const x = new Date(d);
+  x.setDate(x.getDate() + days);
+  return x;
+};
+
+const weekdayIndexKo: Record<string, number> = {
+  일: 0,
+  월: 1,
+  화: 2,
+  수: 3,
+  목: 4,
+  금: 5,
+  토: 6,
+};
+
+const nextWeekday = (now: Date, targetDow: number, preferThisWeek: boolean): Date => {
+  const nowDow = now.getDay();
+  let diff = (targetDow - nowDow + 7) % 7;
+  if (diff === 0) diff = 7;
+  const candidate = addDays(now, diff);
+  if (preferThisWeek) {
+    const thisWeekCandidate = addDays(now, (targetDow - nowDow + 7) % 7);
+    if (thisWeekCandidate.getDay() === targetDow && thisWeekCandidate >= now) {
+      return thisWeekCandidate;
+    }
+  }
+  return candidate;
+};
+
+const parseAbsoluteDate = (text: string, now: Date): DeadlineParse | null => {
+  const t = text;
+  const ymd = t.match(/(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})/);
+  if (ymd) {
+    const y = Number.parseInt(ymd[1], 10);
+    const m = Number.parseInt(ymd[2], 10);
+    const d = Number.parseInt(ymd[3], 10);
+    const dt = new Date(y, m - 1, d);
+    if (!Number.isNaN(dt.getTime())) {
+      return { dueAtMs: endOfDayMs(dt), matchedText: ymd[0], confidence: "high" };
+    }
+  }
+
+  const mdSlash = t.match(/(?:^|[^\d])(\d{1,2})[\/.](\d{1,2})(?:$|[^\d])/);
+  if (mdSlash) {
+    const m = Number.parseInt(mdSlash[1], 10);
+    const d = Number.parseInt(mdSlash[2], 10);
+    const y = now.getFullYear();
+    const dt = new Date(y, m - 1, d);
+    if (!Number.isNaN(dt.getTime())) {
+      return { dueAtMs: endOfDayMs(dt), matchedText: mdSlash[0].trim(), confidence: "medium" };
+    }
+  }
+
+  const mdKo = t.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
+  if (mdKo) {
+    const m = Number.parseInt(mdKo[1], 10);
+    const d = Number.parseInt(mdKo[2], 10);
+    const y = now.getFullYear();
+    const dt = new Date(y, m - 1, d);
+    if (!Number.isNaN(dt.getTime())) {
+      return { dueAtMs: endOfDayMs(dt), matchedText: mdKo[0], confidence: "high" };
+    }
+  }
+
+  return null;
+};
+
+const parseRelativeDeadline = (text: string, now: Date): DeadlineParse | null => {
+  const t = text;
+  if (/(오늘까지|오늘 내로|금일|금일 내)/.test(t)) {
+    return { dueAtMs: endOfDayMs(now), matchedText: "오늘", confidence: "high" };
+  }
+  if (/(내일까지|내일 내로)/.test(t)) {
+    const dt = addDays(now, 1);
+    return { dueAtMs: endOfDayMs(dt), matchedText: "내일", confidence: "high" };
+  }
+  if (/(모레까지|모레 내로)/.test(t)) {
+    const dt = addDays(now, 2);
+    return { dueAtMs: endOfDayMs(dt), matchedText: "모레", confidence: "medium" };
+  }
+
+  const weekday = t.match(/(이번주|다음주)?\s*(월|화|수|목|금|토|일)\s*요일?\s*(까지|내로)?/);
+  if (weekday) {
+    const pref = weekday[1] === "이번주";
+    const next = weekday[1] === "다음주";
+    const dow = weekdayIndexKo[weekday[2]];
+    const base = next ? addDays(now, 7) : now;
+    const dt = nextWeekday(base, dow, pref);
+    return {
+      dueAtMs: endOfDayMs(dt),
+      matchedText: weekday[0].trim(),
+      confidence: weekday[1] ? "high" : "medium",
+    };
+  }
+
+  const inNDays = t.match(/(\d+)\s*(일|days?)\s*(이내|내로|안에|후)/i);
+  if (inNDays) {
+    const n = Number.parseInt(inNDays[1], 10);
+    if (Number.isFinite(n) && n > 0 && n <= 365) {
+      const dt = addDays(now, n);
+      return { dueAtMs: endOfDayMs(dt), matchedText: inNDays[0].trim(), confidence: "medium" };
+    }
+  }
+
+  return null;
+};
+
+export const watchdogExtractDeadline = (
+  subject: string,
+  body: string,
+  now: Date = new Date(),
+): DeadlineParse | null => {
+  const text = `${subject}\n${body}`;
+  const absolute = parseAbsoluteDate(text, now);
+  if (absolute) return absolute;
+  const relative = parseRelativeDeadline(text, now);
+  if (relative) return relative;
+  return null;
+};
+
+export const watchdogTrackSentMail = (input: {
+  threadId: string;
+  sentAtMs: number;
+  subject: string;
+  body: string;
+  to: string;
+  from: string;
+  now?: Date;
+}): WatchdogTrackedMail | null => {
+  const parsed = watchdogExtractDeadline(input.subject, input.body, input.now ?? new Date());
+  if (!parsed) return null;
+  return {
+    threadId: input.threadId,
+    sentAtMs: input.sentAtMs,
+    dueAtMs: parsed.dueAtMs,
+    subject: input.subject,
+    to: input.to,
+    from: input.from,
+  };
+};
+
+export const watchdogNeedsReminderToday = (input: {
+  tracked: WatchdogTrackedMail;
+  threadMessages: Array<{ internalDateMs: number; from: string }>;
+  now?: Date;
+}): { shouldRemind: boolean; reason: string } => {
+  const now = input.now ?? new Date();
+  const tracked = input.tracked;
+  const duePassed = (input.now ? input.now.getTime() : Date.now()) > tracked.dueAtMs;
+  const dueTodayOrPast = startOfDayMs(now) >= startOfDayMs(new Date(tracked.dueAtMs));
+
+  const sentFrom = tracked.from.trim().toLowerCase();
+  const replied = input.threadMessages.some(
+    (m) => m.internalDateMs > tracked.sentAtMs && m.from.trim().toLowerCase() !== sentFrom,
+  );
+
+  if (!dueTodayOrPast) return { shouldRemind: false, reason: "기한이 아직 남아있습니다." };
+  if (replied) return { shouldRemind: false, reason: "이미 답장이 있습니다." };
+
+  if (tracked.notifiedAtMs) {
+    const notifiedDay = startOfDayMs(new Date(tracked.notifiedAtMs));
+    const today = startOfDayMs(now);
+    if (notifiedDay === today) {
+      return { shouldRemind: false, reason: "오늘은 이미 알림을 생성했습니다." };
+    }
+  }
+
+  return {
+    shouldRemind: true,
+    reason: duePassed
+      ? "기한이 지났는데 답장이 없습니다."
+      : "기한일인데 답장이 없습니다.",
+  };
+};
+
+export const watchdogFindReminderCandidates = (input: {
+  trackedMails: WatchdogTrackedMail[];
+  threadMessagesByThreadId: Record<string, Array<{ internalDateMs: number; from: string }>>;
+  now?: Date;
+}): WatchdogReminderCandidate[] => {
+  const now = input.now ?? new Date();
+  const out: WatchdogReminderCandidate[] = [];
+  for (const tracked of input.trackedMails) {
+    const threadMessages = input.threadMessagesByThreadId[tracked.threadId] ?? [];
+    const decision = watchdogNeedsReminderToday({ tracked, threadMessages, now });
+    if (!decision.shouldRemind) continue;
+    out.push({
+      threadId: tracked.threadId,
+      dueAtMs: tracked.dueAtMs,
+      subject: tracked.subject,
+      to: tracked.to,
+      from: tracked.from,
+      reason: decision.reason,
+    });
+  }
+  return out.sort((a, b) => a.dueAtMs - b.dueAtMs);
+};
+
+export const ghostWriteReminderDraft = async (input: {
+  to: string;
+  originalSubject: string;
+  originalBody: string;
+  dueAtMs: number;
+  myContext?: string;
+}): Promise<GhostWriterDraft> => {
+  const dueDate = new Date(input.dueAtMs);
+  const dueText = `${dueDate.getFullYear()}-${String(dueDate.getMonth() + 1).padStart(2, "0")}-${String(dueDate.getDate()).padStart(2, "0")}`;
+
+  const key = JSON.stringify({
+    to: input.to,
+    originalSubject: input.originalSubject,
+    originalBody: input.originalBody,
+    dueAtMs: input.dueAtMs,
+    myContext: input.myContext ?? "",
+  });
+
+  const cached = ghostCache.get(key);
+  if (cached && Date.now() - cached.at < GHOST_CACHE_TTL_MS) return cached.result;
+
+  const existing = ghostInflight.get(key);
+  if (existing) return existing;
+
+  const run = (async (): Promise<GhostWriterDraft> => {
+    const fallbackSubject = ensureRePrefix(input.originalSubject);
+    const fallbackBody = `안녕하세요,\n\n${dueText}까지 부탁드렸던 건 관련해서 진행 상황 확인 부탁드립니다.\n가능하시면 예상 일정도 함께 공유해주시면 감사하겠습니다.\n\n감사합니다.`;
+
+    if (!process.env.NEXT_PUBLIC_OPENAI_API_KEY) {
+      const result = { draftSubject: fallbackSubject, draftBody: fallbackBody };
+      ghostCache.set(key, { at: Date.now(), result });
+      return result;
+    }
+
+    const model = process.env.NEXT_PUBLIC_OPENAI_MODEL || "gpt-5.4-nano";
+
+    const system = [
+      "당신은 비즈니스 이메일 '리마인더(Watchdog) 고스트 라이터'입니다.",
+      "목표: 재촉하지 않으면서 부드럽고 명확하게 리마인드하는 답장 초안을 작성합니다.",
+      "원문 이메일에 없는 사실/수치/약속/일정을 절대 만들어내지 않습니다.",
+      "다음 요소를 포함할 수 있습니다: 확인 요청, 예상 일정 질문, 도움 필요 여부 질문, 감사/마무리.",
+      "원문의 언어(한국어/영어)를 유지합니다.",
+      "반드시 아래 JSON 형식만 출력합니다. 다른 텍스트는 금지합니다.",
+    ].join("\n");
+
+    const user = [
+      "[상황]",
+      `기한: ${dueText}`,
+      `수신인(To): ${input.to}`,
+      "",
+      "[원문 이메일(내가 보낸 요청)]",
+      `Subject: ${input.originalSubject}`,
+      "",
+      input.originalBody,
+      "",
+      "[내 컨텍스트(있으면 반영)]",
+      input.myContext || "",
+      "",
+      "[출력 JSON 스키마]",
+      '{ "draftSubject": string, "draftBody": string }',
+    ].join("\n");
+
+    try {
+      const response = await openai.chat.completions.create({
+        model,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0.2,
+      });
+
+      const content = response.choices[0]?.message?.content ?? "";
+      const parsed = safeJsonParse(content);
+      const normalized = normalizeGhostDraft(parsed, fallbackSubject, fallbackBody);
+      ghostCache.set(key, { at: Date.now(), result: normalized });
+      return normalized;
+    } catch (error) {
+      console.error("Watchdog reminder draft failed:", error);
+      const result = { draftSubject: fallbackSubject, draftBody: fallbackBody };
+      ghostCache.set(key, { at: Date.now(), result });
+      return result;
+    } finally {
+      ghostInflight.delete(key);
+    }
+  })();
+
+  ghostInflight.set(key, run);
+  return run;
+};
+
+export interface WatchdogLLMOutput {
+  shouldTrack: boolean;
+  dueDateISO: string | null;
+  dueConfidence: "high" | "medium" | "low";
+  dueReason: string;
+  hasReply: boolean;
+  shouldRemindToday: boolean;
+  remindReason: string;
+  draft: GhostWriterDraft | null;
+}
+
+export interface WatchdogLLMResult {
+  tracked: WatchdogTrackedMail | null;
+  candidate: WatchdogReminderCandidate | null;
+  draft: GhostWriterDraft | null;
+  modelOutput: WatchdogLLMOutput;
+}
+
+const normalizeWatchdogLLMOutput = (value: unknown): WatchdogLLMOutput => {
+  const obj =
+    value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+
+  const shouldTrack = Boolean(obj.shouldTrack);
+  const dueDateISO =
+    typeof obj.dueDateISO === "string" && obj.dueDateISO.trim()
+      ? obj.dueDateISO.trim()
+      : null;
+  const dueConfidence =
+    obj.dueConfidence === "high" || obj.dueConfidence === "medium" || obj.dueConfidence === "low"
+      ? obj.dueConfidence
+      : "low";
+  const dueReason = typeof obj.dueReason === "string" ? obj.dueReason.trim() : "";
+  const hasReply = Boolean(obj.hasReply);
+  const shouldRemindToday = Boolean(obj.shouldRemindToday);
+  const remindReason = typeof obj.remindReason === "string" ? obj.remindReason.trim() : "";
+
+  const draftObj = obj.draft && typeof obj.draft === "object" ? (obj.draft as Record<string, unknown>) : null;
+  const draft =
+    draftObj && typeof draftObj.draftSubject === "string" && typeof draftObj.draftBody === "string"
+      ? {
+          draftSubject: draftObj.draftSubject.trim(),
+          draftBody: draftObj.draftBody,
+        }
+      : null;
+
+  return {
+    shouldTrack,
+    dueDateISO,
+    dueConfidence,
+    dueReason,
+    hasReply,
+    shouldRemindToday,
+    remindReason,
+    draft,
+  };
+};
+
+const parseISODateToDueAtMs = (iso: string, now: Date): number | null => {
+  const m = iso.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const y = Number.parseInt(m[1], 10);
+  const mo = Number.parseInt(m[2], 10);
+  const d = Number.parseInt(m[3], 10);
+  const dt = new Date(y, mo - 1, d);
+  if (Number.isNaN(dt.getTime())) return null;
+
+  const min = addDays(now, -365).getTime();
+  const max = addDays(now, 365).getTime();
+  if (dt.getTime() < min || dt.getTime() > max) return null;
+  return endOfDayMs(dt);
+};
+
+const watchdogLLMCache = new Map<string, { at: number; result: WatchdogLLMResult }>();
+const watchdogLLMInflight = new Map<string, Promise<WatchdogLLMResult>>();
+const WATCHDOG_LLM_CACHE_TTL_MS = 30_000;
+
+export const watchdogEvaluateForReminderWithLLM = async (input: {
+  sent: {
+    threadId: string;
+    sentAtMs: number;
+    subject: string;
+    body: string;
+    to: string;
+    from: string;
+  };
+  threadMessages: Array<{
+    internalDateMs: number;
+    from: string;
+    subject?: string;
+    snippet?: string;
+    body?: string;
+  }>;
+  now?: Date;
+  myContext?: string;
+}): Promise<WatchdogLLMResult> => {
+  const now = input.now ?? new Date();
+  const key = JSON.stringify({
+    sent: input.sent,
+    threadMessages: input.threadMessages.map((m) => ({
+      internalDateMs: m.internalDateMs,
+      from: m.from,
+      subject: m.subject ?? "",
+      snippet: m.snippet ?? "",
+      body: m.body ? m.body.slice(0, 1000) : "",
+    })),
+    nowISO: now.toISOString().slice(0, 10),
+    myContext: input.myContext ?? "",
+  });
+
+  const cached = watchdogLLMCache.get(key);
+  if (cached && Date.now() - cached.at < WATCHDOG_LLM_CACHE_TTL_MS) return cached.result;
+
+  const existing = watchdogLLMInflight.get(key);
+  if (existing) return existing;
+
+  const run = (async (): Promise<WatchdogLLMResult> => {
+    const modelOutputFallback: WatchdogLLMOutput = {
+      shouldTrack: false,
+      dueDateISO: null,
+      dueConfidence: "low",
+      dueReason: "",
+      hasReply: false,
+      shouldRemindToday: false,
+      remindReason: "",
+      draft: null,
+    };
+
+    if (!process.env.NEXT_PUBLIC_OPENAI_API_KEY) {
+      const result: WatchdogLLMResult = {
+        tracked: null,
+        candidate: null,
+        draft: null,
+        modelOutput: modelOutputFallback,
+      };
+      watchdogLLMCache.set(key, { at: Date.now(), result });
+      return result;
+    }
+
+    const model = process.env.NEXT_PUBLIC_OPENAI_MODEL || "gpt-5.4-nano";
+
+    const system = [
+      "당신은 이메일 '워치독(Watchdog)' 에이전트입니다.",
+      "목표: (1) 발송 메일에서 기한(deadline)을 추출해 트래킹할지 결정하고, (2) 스레드를 보고 오늘 리마인더 알림이 필요한지 판단하고, (3) 필요하면 재촉하지 않는 리마인드 초안을 제공합니다.",
+      "반드시 아래 JSON 스키마만 출력합니다. 다른 텍스트는 금지합니다.",
+      "중요: 원문/스레드에 없는 사실, 일정, 약속을 만들어내지 않습니다. 불확실하면 shouldTrack=false 또는 dueConfidence를 낮추고 dueReason에 근거를 씁니다.",
+      "dueDateISO는 반드시 YYYY-MM-DD 형식이며, 상대적인 표현(예: 금요일까지)은 현재 날짜(nowDateISO)를 기준으로 날짜로 변환합니다.",
+      "shouldRemindToday는 다음 원칙으로 판단합니다:",
+      "- 기한이 오늘이거나 이미 지났고",
+      "- 발송 시점(sentAtMs) 이후에 상대의 답장(hasReply)이 없으면 true",
+      "- 기한이 남아있으면 false",
+      "draft는 shouldRemindToday가 true일 때만 작성합니다(정중/부드럽게).",
+      "draftSubject는 'Re:'를 포함한 제목을 권장합니다.",
+    ].join("\n");
+
+    const user = [
+      "[현재 날짜]",
+      `nowDateISO: ${now.toISOString().slice(0, 10)}`,
+      "",
+      "[내가 보낸 메일(트래킹 대상 후보)]",
+      `threadId: ${input.sent.threadId}`,
+      `sentAtMs: ${input.sent.sentAtMs}`,
+      `from: ${input.sent.from}`,
+      `to: ${input.sent.to}`,
+      `subject: ${input.sent.subject}`,
+      "body:",
+      input.sent.body,
+      "",
+      "[스레드 메시지 요약(시간순)]",
+      JSON.stringify(
+        input.threadMessages
+          .slice()
+          .sort((a, b) => a.internalDateMs - b.internalDateMs)
+          .map((m) => ({
+            internalDateMs: m.internalDateMs,
+            from: m.from,
+            subject: m.subject ?? "",
+            snippet: (m.snippet ?? "").slice(0, 400),
+            body: (m.body ?? "").slice(0, 800),
+          })),
+      ),
+      "",
+      "[내 컨텍스트(선택)]",
+      input.myContext ?? "",
+      "",
+      "[출력 JSON 스키마]",
+      "{",
+      '  "shouldTrack": boolean,',
+      '  "dueDateISO": string | null,',
+      '  "dueConfidence": "high" | "medium" | "low",',
+      '  "dueReason": string,',
+      '  "hasReply": boolean,',
+      '  "shouldRemindToday": boolean,',
+      '  "remindReason": string,',
+      '  "draft": { "draftSubject": string, "draftBody": string } | null',
+      "}",
+    ].join("\n");
+
+    try {
+      const response = await openai.chat.completions.create({
+        model,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0.2,
+      });
+
+      const content = response.choices[0]?.message?.content ?? "";
+      const parsed = safeJsonParse(content);
+      const modelOutput = normalizeWatchdogLLMOutput(parsed);
+
+      const dueAtMs =
+        modelOutput.shouldTrack && modelOutput.dueDateISO
+          ? parseISODateToDueAtMs(modelOutput.dueDateISO, now)
+          : null;
+
+      const deterministicHasReply = input.threadMessages.some(
+        (m) =>
+          m.internalDateMs > input.sent.sentAtMs &&
+          m.from.trim().toLowerCase() !== input.sent.from.trim().toLowerCase(),
+      );
+
+      const hasReply = modelOutput.hasReply || deterministicHasReply;
+
+      const shouldRemindToday =
+        dueAtMs !== null &&
+        !hasReply &&
+        modelOutput.shouldRemindToday &&
+        startOfDayMs(now) >= startOfDayMs(new Date(dueAtMs));
+
+      const tracked: WatchdogTrackedMail | null =
+        dueAtMs && modelOutput.shouldTrack
+          ? {
+              threadId: input.sent.threadId,
+              sentAtMs: input.sent.sentAtMs,
+              dueAtMs,
+              subject: input.sent.subject,
+              to: input.sent.to,
+              from: input.sent.from,
+            }
+          : null;
+
+      const candidate: WatchdogReminderCandidate | null =
+        tracked && shouldRemindToday
+          ? {
+              threadId: tracked.threadId,
+              dueAtMs: tracked.dueAtMs,
+              subject: tracked.subject,
+              to: tracked.to,
+              from: tracked.from,
+              reason: modelOutput.remindReason || "리마인드가 필요합니다.",
+            }
+          : null;
+
+      const draft = candidate && modelOutput.draft ? modelOutput.draft : null;
+
+      const result: WatchdogLLMResult = {
+        tracked,
+        candidate,
+        draft,
+        modelOutput: { ...modelOutput, hasReply, shouldRemindToday },
+      };
+
+      watchdogLLMCache.set(key, { at: Date.now(), result });
+      return result;
+    } catch (error) {
+      console.error("Watchdog LLM evaluation failed:", error);
+      const result: WatchdogLLMResult = {
+        tracked: null,
+        candidate: null,
+        draft: null,
+        modelOutput: modelOutputFallback,
+      };
+      watchdogLLMCache.set(key, { at: Date.now(), result });
+      return result;
+    } finally {
+      watchdogLLMInflight.delete(key);
+    }
+  })();
+
+  watchdogLLMInflight.set(key, run);
+  return run;
+};
