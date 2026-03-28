@@ -50,7 +50,7 @@ export const analyzeMail = async (data: {
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-5o-nano',
+      model: 'gpt-5.4-nano',
       messages: [{ role: 'system', content: prompt }],
       response_format: { type: 'json_object' },
     });
