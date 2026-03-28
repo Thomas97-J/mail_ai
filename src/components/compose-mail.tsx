@@ -54,20 +54,12 @@ export function ComposeMail() {
     "none" | "positive" | "negative" | "custom"
   >("none");
   const [customIntent, setCustomIntent] = useState("");
-  const [debouncedCustomIntent, setDebouncedCustomIntent] = useState("");
+  const [activeIntent, setActiveIntent] = useState("");
   const { accessToken, replyingToMail, setReplyingToMail } = useAuthStore();
   const lastAnalyzedRef = useRef<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const formData = watch();
-
-  // 커스텀 의도 데바운스
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedCustomIntent(customIntent);
-    }, 800);
-    return () => clearTimeout(timer);
-  }, [customIntent]);
 
   // 답장 모드 처리 (고스트 라이터 초안 작성 포함)
   useEffect(() => {
@@ -84,7 +76,7 @@ export function ComposeMail() {
             intent = "긍정적인 답변 (수락, 감사, 동의)";
           else if (replyIntent === "negative")
             intent = "거절하는 답변 (정중한 거절, 사과, 불가)";
-          else if (replyIntent === "custom") intent = debouncedCustomIntent;
+          else if (replyIntent === "custom") intent = activeIntent;
 
           const draft = await ghostWriteReplyDraft({
             originalFrom: replyingToMail.from,
@@ -119,12 +111,13 @@ export function ComposeMail() {
 
       generateDraft();
     }
-  }, [replyingToMail, replyIntent, debouncedCustomIntent, setValue]);
+  }, [replyingToMail, replyIntent, activeIntent, setValue]);
 
   const handleCancelReply = () => {
     setReplyingToMail(null);
     setReplyIntent("none");
     setCustomIntent("");
+    setActiveIntent("");
     reset({
       to: "",
       cc: "",
@@ -343,14 +336,33 @@ export function ComposeMail() {
             </button>
           </div>
           {replyIntent === "custom" && (
-            <div className="mt-2">
+            <div className="mt-2 flex gap-2">
               <input
                 type="text"
                 value={customIntent}
                 onChange={(e) => setCustomIntent(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && customIntent.trim()) {
+                    e.preventDefault();
+                    setActiveIntent(customIntent);
+                  }
+                }}
                 placeholder="예: 회의 시간을 내일 오후 2시로 조정하고 싶어"
-                className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-xs font-medium focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 outline-none transition-all shadow-sm"
+                className="flex-1 px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-xs font-medium focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 outline-none transition-all shadow-sm"
               />
+              <button
+                type="button"
+                onClick={() => setActiveIntent(customIntent)}
+                disabled={!customIntent.trim() || isGeneratingDraft}
+                className="px-4 py-2.5 bg-purple-600 text-white rounded-xl text-xs font-bold hover:bg-purple-700 disabled:bg-slate-200 transition-all shadow-md shadow-purple-200 flex items-center gap-2 whitespace-nowrap"
+              >
+                {isGeneratingDraft ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Sparkles size={14} />
+                )}
+                초안 생성
+              </button>
             </div>
           )}
         </div>

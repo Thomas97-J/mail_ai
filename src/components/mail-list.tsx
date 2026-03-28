@@ -26,21 +26,50 @@ export function MailList() {
       enabled: !!accessToken,
     });
 
+  // 폴더 변경 시 기존 리스트 초기화
+  const handleFolderChange = (folder: "INBOX" | "SENT") => {
+    setParsedMails([]);
+    setCurrentFolder(folder);
+  };
+
   useEffect(() => {
     if (data?.pages) {
       const allMessages = data.pages.flatMap((page) => page.messages || []);
       const loadDetails = async () => {
-        const details = await Promise.all(
-          allMessages.map((msg: { id: string }) =>
-            fetchMessageDetail(accessToken!, msg.id),
-          ),
+        // 이미 가져온 메일 ID 제외
+        const existingIds = new Set(parsedMails.map((m) => m.id));
+        const newMessages = allMessages.filter(
+          (msg: { id: string }) => !existingIds.has(msg.id),
         );
-        const parsed = details.map(parseMessage);
-        setParsedMails(parsed);
+
+        if (newMessages.length === 0) return;
+
+        try {
+          const details = await Promise.all(
+            newMessages.map((msg: { id: string }) =>
+              fetchMessageDetail(accessToken!, msg.id),
+            ),
+          );
+          const parsed = details.map(parseMessage);
+          setParsedMails((prev) => {
+            // ID 기준 중복 제거 및 시간 순 정렬 (allMessages 순서 유지)
+            const combined = [...prev, ...parsed];
+            const unique = Array.from(
+              new Map(combined.map((m) => [m.id, m])).values(),
+            );
+            // allMessages의 순서를 따라가도록 재정렬
+            const orderMap = new Map(allMessages.map((m, i) => [m.id, i]));
+            return unique.sort(
+              (a, b) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0),
+            );
+          });
+        } catch (err) {
+          console.error("Failed to load message details:", err);
+        }
       };
       loadDetails();
     }
-  }, [data, accessToken]);
+  }, [data, accessToken, parsedMails.length]);
 
   if (status === "pending") {
     return (
@@ -52,8 +81,19 @@ export function MailList() {
 
   if (status === "error") {
     return (
-      <div className="p-8 text-red-500 text-center">
-        메일을 불러오는 중 오류가 발생했습니다.
+      <div className="p-8 text-center flex flex-col items-center gap-4">
+        <p className="text-red-500 font-bold">
+          메일을 불러오는 중 오류가 발생했습니다.
+        </p>
+        <p className="text-slate-500 text-xs">
+          인증 토큰이 만료되었을 수 있습니다. 다시 로그인해 주세요.
+        </p>
+        <button
+          onClick={() => useAuthStore.getState().logout()}
+          className="px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-black transition-all"
+        >
+          로그아웃 후 다시 로그인
+        </button>
       </div>
     );
   }
@@ -79,7 +119,7 @@ export function MailList() {
 
         <div className="flex gap-2 p-1 bg-slate-50 rounded-xl border border-slate-100">
           <button
-            onClick={() => setCurrentFolder("INBOX")}
+            onClick={() => handleFolderChange("INBOX")}
             className={`flex-1 flex items-center justify-center gap-2 py-2 text-xs font-bold rounded-lg transition-all ${
               currentFolder === "INBOX"
                 ? "bg-white text-blue-600 shadow-sm ring-1 ring-slate-200"
@@ -90,7 +130,7 @@ export function MailList() {
             수신함
           </button>
           <button
-            onClick={() => setCurrentFolder("SENT")}
+            onClick={() => handleFolderChange("SENT")}
             className={`flex-1 flex items-center justify-center gap-2 py-2 text-xs font-bold rounded-lg transition-all ${
               currentFolder === "SENT"
                 ? "bg-white text-blue-600 shadow-sm ring-1 ring-slate-200"

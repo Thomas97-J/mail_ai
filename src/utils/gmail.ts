@@ -54,25 +54,68 @@ export const fetchMessages = async (
   pageToken?: string,
   labelId: string = "INBOX",
 ) => {
-  const response = await axios.get(`${GMAIL_API_BASE}/messages`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-    params: {
-      maxResults: 10,
-      pageToken,
-      labelIds: labelId,
-    },
-  });
-  return response.data;
+  try {
+    const response = await axios.get(`${GMAIL_API_BASE}/messages`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      params: {
+        maxResults: 10,
+        pageToken,
+        labelIds: labelId,
+      },
+    });
+    return response.data;
+  } catch (error: unknown) {
+    if (axios.isAxiosError(error)) {
+      console.error("fetchMessages failed:", {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message,
+        code: error.code,
+        config: {
+          url: error.config?.url,
+          method: error.config?.method,
+          headers: error.config?.headers,
+        },
+      });
+    } else {
+      console.error("fetchMessages failed with non-axios error:", error);
+    }
+    throw error;
+  }
 };
 
 export const fetchMessageDetail = async (
   accessToken: string,
   messageId: string,
 ): Promise<MessageDetail> => {
-  const response = await axios.get(`${GMAIL_API_BASE}/messages/${messageId}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  return response.data;
+  try {
+    const response = await axios.get(
+      `${GMAIL_API_BASE}/messages/${messageId}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      },
+    );
+    return response.data;
+  } catch (error: unknown) {
+    if (axios.isAxiosError(error)) {
+      console.error(`fetchMessageDetail failed for ${messageId}:`, {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message,
+        code: error.code,
+        config: {
+          url: error.config?.url,
+          method: error.config?.method,
+        },
+      });
+    } else {
+      console.error(
+        `fetchMessageDetail failed for ${messageId} with non-axios error:`,
+        error,
+      );
+    }
+    throw error;
+  }
 };
 
 export const decodeBase64 = (data: string) => {
