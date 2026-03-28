@@ -256,12 +256,6 @@ const localAnalyzeDeterministic = (data: {
   }
 
   const body = data.body.trim();
-  const lowerBody = body.toLowerCase();
-  const mentionedAttachment = attachmentKeywords.some((k) => lowerBody.includes(k));
-  if (mentionedAttachment && !data.hasAttachment) {
-    errors.push("본문에 첨부 언급이 있는데 첨부파일이 없습니다.");
-    severity = maxSeverity(severity, "Red");
-  }
 
   const piiSignals: Array<{ re: RegExp; msg: string; sev: Severity }> = [
     {
