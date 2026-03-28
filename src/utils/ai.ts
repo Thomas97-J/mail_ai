@@ -368,17 +368,34 @@ export const analyzeMail = async (data: {
 
 export interface AnalysisWithImprovedBody extends AnalysisResult {
   improvedBody: string;
+  improvedTitle: string;
 }
 
-type RewriteResult = { improvedBody: string };
+type RewriteResult = { improvedBody: string; improvedTitle: string };
 
-const normalizeRewrite = (value: unknown, fallback: string): RewriteResult => {
-  const obj = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+const normalizeRewrite = (
+  value: unknown,
+  fallbackBody: string,
+  fallbackTitle: string,
+): RewriteResult => {
+  const obj =
+    value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   const improvedBody =
-    typeof obj.improvedBody === 'string' && obj.improvedBody.trim()
+    typeof obj.improvedBody === "string" && obj.improvedBody.trim()
       ? obj.improvedBody
-      : fallback;
-  return { improvedBody };
+      : fallbackBody;
+
+  const titleCandidate =
+    (typeof obj.improvedTitle === "string" && obj.improvedTitle.trim()
+      ? obj.improvedTitle
+      : undefined) ??
+    (typeof obj.improvedtitle === "string" && obj.improvedtitle.trim()
+      ? obj.improvedtitle
+      : undefined) ??
+    fallbackTitle;
+
+  const improvedTitle = titleCandidate.trim() || fallbackTitle;
+  return { improvedBody, improvedTitle };
 };
 
 const rewriteCache = new Map<string, { at: number; result: RewriteResult }>();
@@ -393,6 +410,7 @@ export const analyzeMailWithImprovedBody = async (data: {
   hasAttachment: boolean;
 }): Promise<AnalysisWithImprovedBody> => {
   const analysis = await analyzeMail(data);
+  const fallbackTitle = data.subject;
 
   const rewriteKey = JSON.stringify({
     to: data.to,
@@ -403,18 +421,29 @@ export const analyzeMailWithImprovedBody = async (data: {
 
   const cached = rewriteCache.get(rewriteKey);
   if (cached && Date.now() - cached.at < REWRITE_CACHE_TTL_MS) {
-    return { ...analysis, improvedBody: cached.result.improvedBody };
+    return {
+      ...analysis,
+      improvedBody: cached.result.improvedBody,
+      improvedTitle: cached.result.improvedTitle,
+    };
   }
 
   const existing = rewriteInflight.get(rewriteKey);
   if (existing) {
     const rewrite = await existing;
-    return { ...analysis, improvedBody: rewrite.improvedBody };
+    return {
+      ...analysis,
+      improvedBody: rewrite.improvedBody,
+      improvedTitle: rewrite.improvedTitle,
+    };
   }
 
   const run = (async (): Promise<RewriteResult> => {
     if (!process.env.NEXT_PUBLIC_OPENAI_API_KEY) {
-      const result: RewriteResult = { improvedBody: data.body };
+      const result: RewriteResult = {
+        improvedBody: data.body,
+        improvedTitle: fallbackTitle,
+      };
       rewriteCache.set(rewriteKey, { at: Date.now(), result });
       return result;
     }
@@ -427,6 +456,7 @@ export const analyzeMailWithImprovedBody = async (data: {
       '언어는 원문의 톤/언어(한국어/영어)를 유지합니다.',
       '명령조/압박/책임 전가/무례한 표현은 완곡하고 전문적인 표현으로 바꿉니다.',
       '가능하면 다음을 보강합니다: 목적, 요청사항, 기한/다음 액션, 감사/마무리 문장.',
+      '제목(improvedTitle)은 짧고 구체적으로(가능하면 60자 이내), 원문의 의미를 보존하며 개선합니다.',
       '반드시 아래 JSON 형식만 출력합니다. 다른 텍스트는 금지합니다.',
     ].join('\n');
 
@@ -441,7 +471,7 @@ export const analyzeMailWithImprovedBody = async (data: {
       data.body,
       '',
       '[출력 JSON 스키마]',
-      '{ "improvedBody": string }',
+      '{ "improvedTitle": string, "improvedBody": string }',
     ].join('\n');
 
     try {
@@ -457,12 +487,15 @@ export const analyzeMailWithImprovedBody = async (data: {
 
       const content = response.choices[0]?.message?.content ?? '';
       const parsed = safeJsonParse(content);
-      const normalized = normalizeRewrite(parsed, data.body);
+      const normalized = normalizeRewrite(parsed, data.body, fallbackTitle);
       rewriteCache.set(rewriteKey, { at: Date.now(), result: normalized });
       return normalized;
     } catch (error) {
       console.error('AI Rewrite failed:', error);
-      const result: RewriteResult = { improvedBody: data.body };
+      const result: RewriteResult = {
+        improvedBody: data.body,
+        improvedTitle: fallbackTitle,
+      };
       rewriteCache.set(rewriteKey, { at: Date.now(), result });
       return result;
     } finally {
@@ -472,7 +505,11 @@ export const analyzeMailWithImprovedBody = async (data: {
 
   rewriteInflight.set(rewriteKey, run);
   const rewrite = await run;
-  return { ...analysis, improvedBody: rewrite.improvedBody };
+  return {
+    ...analysis,
+    improvedBody: rewrite.improvedBody,
+    improvedTitle: rewrite.improvedTitle,
+  };
 };
 
 export interface GhostWriterDraft {
