@@ -4,7 +4,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { useForm } from "react-hook-form";
 import { debounce } from "lodash";
 import { analyzeMail, AnalysisResult } from "@/utils/ai";
-import { generateRawMime } from "@/utils/mime";
+import { generateRawMime, MailAttachment } from "@/utils/mime";
 import { sendMail } from "@/utils/gmail";
 import { useAuthStore } from "@/lib/store";
 import {
@@ -15,6 +15,9 @@ import {
   Loader2,
   ShieldCheck,
   Shield,
+  Paperclip,
+  File,
+  X as XIcon,
 } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
@@ -31,26 +34,22 @@ interface MailForm {
 }
 
 export function ComposeMail() {
-  const {
-    register,
-    watch,
-    handleSubmit,
-    reset,
-    formState: { errors },
-  } = useForm<MailForm>();
+  const { register, watch, reset } = useForm<MailForm>();
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showReview, setShowReview] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [attachments, setAttachments] = useState<File[]>([]);
   const accessToken = useAuthStore((state) => state.accessToken);
   const lastAnalyzedRef = useRef<string>("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const formData = watch();
 
   const debouncedAnalyze = useMemo(
     () =>
-      debounce(async (data: MailForm) => {
-        const contentKey = JSON.stringify(data);
+      debounce(async (data: MailForm, hasAttachment: boolean) => {
+        const contentKey = JSON.stringify({ ...data, hasAttachment });
         if (!data.to || !data.subject || !data.body) {
           setAnalysis(null);
           lastAnalyzedRef.current = "";
@@ -67,7 +66,7 @@ export function ComposeMail() {
             cc: data.cc,
             subject: data.subject,
             body: data.body,
-            hasAttachment: false,
+            hasAttachment,
           });
           setAnalysis(result);
           lastAnalyzedRef.current = contentKey;
@@ -81,9 +80,31 @@ export function ComposeMail() {
   );
 
   useEffect(() => {
-    debouncedAnalyze(formData);
+    debouncedAnalyze(formData, attachments.length > 0);
     return () => debouncedAnalyze.cancel();
-  }, [formData, debouncedAnalyze]);
+  }, [formData, attachments.length, debouncedAnalyze]);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      setAttachments((prev) => [...prev, ...Array.from(e.target.files!)]);
+    }
+  };
+
+  const removeAttachment = (index: number) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => {
+        const base64 = (reader.result as string).split(",")[1];
+        resolve(base64);
+      };
+      reader.onerror = (error) => reject(error);
+    });
+  };
 
   const handleSendClick = () => {
     setShowReview(true);
@@ -93,17 +114,27 @@ export function ComposeMail() {
     if (!accessToken) return;
     setIsSending(true);
     try {
+      const processedAttachments: MailAttachment[] = await Promise.all(
+        attachments.map(async (file) => ({
+          filename: file.name,
+          contentType: file.type,
+          data: await fileToBase64(file),
+        })),
+      );
+
       const rawMime = generateRawMime({
         to: formData.to,
         cc: formData.cc,
         subject: formData.subject,
         body: formData.body,
+        attachments: processedAttachments,
       });
       await sendMail(accessToken, rawMime);
       alert("메일이 성공적으로 전송되었습니다!");
       setShowReview(false);
       reset(); // 폼 초기화
       setAnalysis(null); // 분석 결과 초기화
+      setAttachments([]); // 첨부파일 초기화
       lastAnalyzedRef.current = ""; // 참조 초기화
     } catch (err) {
       console.error(err);
@@ -182,6 +213,52 @@ export function ComposeMail() {
             className="px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all placeholder:text-slate-400 text-slate-900 resize-none leading-relaxed"
             placeholder="이메일 내용을 자유롭게 작성하세요..."
           />
+        </div>
+
+        {/* Attachment Section */}
+        <div className="grid gap-3">
+          <div className="flex items-center justify-between">
+            <label className="text-sm font-semibold text-slate-700 ml-1 flex items-center gap-2">
+              <Paperclip size={16} className="text-slate-400" /> 첨부파일
+            </label>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="text-xs font-bold text-blue-600 hover:text-blue-700 px-3 py-1.5 bg-blue-50 rounded-lg border border-blue-100 transition-all flex items-center gap-1.5"
+            >
+              파일 추가
+            </button>
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileChange}
+              className="hidden"
+              multiple
+            />
+          </div>
+
+          {attachments.length > 0 && (
+            <div className="flex flex-wrap gap-2 p-3 bg-slate-50 border border-slate-200 rounded-xl">
+              {attachments.map((file, index) => (
+                <div
+                  key={index}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 rounded-lg shadow-sm group hover:border-red-200 transition-all"
+                >
+                  <File size={14} className="text-slate-400" />
+                  <span className="text-xs font-medium text-slate-600 max-w-[150px] truncate">
+                    {file.name}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(index)}
+                    className="p-0.5 hover:bg-red-50 text-slate-400 hover:text-red-500 rounded transition-all"
+                  >
+                    <XIcon size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="flex flex-col sm:flex-row justify-between items-center gap-4 mt-4 pt-6 border-t border-slate-100">

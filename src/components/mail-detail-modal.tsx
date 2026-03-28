@@ -1,7 +1,7 @@
 'use client';
 
 import { useAuthStore } from '@/lib/store';
-import { X, User, Calendar, Mail, ExternalLink } from 'lucide-react';
+import { X, User, Calendar, Mail } from 'lucide-react';
 
 export function MailDetailModal() {
   const { selectedMail, setSelectedMail } = useAuthStore();
