@@ -18,7 +18,7 @@ import {
   Paperclip,
   File,
   X as XIcon,
-  Wand2,
+  Reply,
 } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
@@ -41,11 +41,45 @@ export function ComposeMail() {
   const [showReview, setShowReview] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [attachments, setAttachments] = useState<File[]>([]);
-  const accessToken = useAuthStore((state) => state.accessToken);
+  const { accessToken, replyingToMail, setReplyingToMail } = useAuthStore();
   const lastAnalyzedRef = useRef<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const formData = watch();
+
+  // 답장 모드 처리
+  useEffect(() => {
+    if (replyingToMail) {
+      const subject = replyingToMail.subject.startsWith("Re:")
+        ? replyingToMail.subject
+        : `Re: ${replyingToMail.subject}`;
+
+      // 이메일 주소만 추출 (이름 제외)
+      const toEmail =
+        replyingToMail.from.match(/<(.+)>/)?.[1] || replyingToMail.from;
+
+      const formattedOriginalBody = `\n\n--- Original Message ---\nFrom: ${replyingToMail.from}\nDate: ${replyingToMail.date}\nSubject: ${replyingToMail.subject}\n\n${replyingToMail.body || replyingToMail.snippet}`;
+
+      setValue("to", toEmail);
+      setValue("subject", subject);
+      setValue("body", formattedOriginalBody);
+
+      // 포커스를 본문 처음에 두기 위해 (브라우저 기본 동작 지원 시)
+      // 실제로는 수동으로 커서 위치 조정이 필요할 수 있지만 일단 데이터만 세팅
+    }
+  }, [replyingToMail, setValue]);
+
+  const handleCancelReply = () => {
+    setReplyingToMail(null);
+    reset({
+      to: "",
+      cc: "",
+      subject: "",
+      body: "",
+    });
+    setAnalysis(null);
+    lastAnalyzedRef.current = "";
+  };
 
   const debouncedAnalyze = useMemo(
     () =>
@@ -111,14 +145,6 @@ export function ComposeMail() {
     setShowReview(true);
   };
 
-  const handleAutoFix = () => {
-    if (analysis?.improvedBody) {
-      setValue("body", analysis.improvedBody);
-      setShowReview(false);
-      alert("AI의 제안에 따라 본문이 수정되었습니다.");
-    }
-  };
-
   const onConfirmSend = async () => {
     if (!accessToken) return;
     setIsSending(true);
@@ -138,12 +164,17 @@ export function ComposeMail() {
         body: formData.body,
         attachments: processedAttachments,
       });
-      await sendMail(accessToken, rawMime);
+      await sendMail(
+        accessToken,
+        rawMime,
+        replyingToMail ? replyingToMail.threadId : undefined,
+      );
       alert("메일이 성공적으로 전송되었습니다!");
       setShowReview(false);
       reset(); // 폼 초기화
       setAnalysis(null); // 분석 결과 초기화
       setAttachments([]); // 첨부파일 초기화
+      setReplyingToMail(null); // 답장 모드 초기화
       lastAnalyzedRef.current = ""; // 참조 초기화
     } catch (err) {
       console.error(err);
@@ -171,13 +202,27 @@ export function ComposeMail() {
       <div className="flex items-center justify-between border-b border-slate-100 pb-6">
         <h2 className="text-2xl font-bold tracking-tight text-slate-900 flex items-center gap-3">
           <div className="p-2 bg-blue-50 rounded-lg">
-            <Send size={22} className="text-blue-600" />
+            {replyingToMail ? (
+              <Reply size={22} className="text-blue-600" />
+            ) : (
+              <Send size={22} className="text-blue-600" />
+            )}
           </div>
-          메일 작성
+          {replyingToMail ? "메일 답장" : "메일 작성"}
         </h2>
-        <div className="px-3 py-1 bg-emerald-50 text-emerald-700 text-xs font-bold rounded-full border border-emerald-100 flex items-center gap-1.5">
-          <ShieldCheck size={14} />
-          AI 가디언 활성화됨
+        <div className="flex items-center gap-3">
+          {replyingToMail && (
+            <button
+              onClick={handleCancelReply}
+              className="text-xs font-bold text-slate-500 hover:text-slate-700 px-3 py-1.5 bg-slate-100 rounded-full transition-all"
+            >
+              답장 취소
+            </button>
+          )}
+          <div className="px-3 py-1 bg-emerald-50 text-emerald-700 text-xs font-bold rounded-full border border-emerald-100 flex items-center gap-1.5">
+            <ShieldCheck size={14} />
+            AI 가디언 활성화됨
+          </div>
         </div>
       </div>
 
@@ -418,15 +463,6 @@ export function ComposeMail() {
               >
                 닫고 직접 수정
               </button>
-              {analysis.improvedBody && (
-                <button
-                  onClick={handleAutoFix}
-                  className="px-6 py-3 bg-blue-50 text-blue-600 border border-blue-200 rounded-xl font-bold hover:bg-blue-100 flex items-center justify-center gap-2 transition-all shadow-sm"
-                >
-                  <Wand2 size={18} />
-                  자동 수정 적용
-                </button>
-              )}
               <button
                 onClick={onConfirmSend}
                 disabled={isSending}

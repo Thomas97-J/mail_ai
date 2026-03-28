@@ -1,12 +1,18 @@
 'use client';
 
-import { useAuthStore } from '@/lib/store';
-import { X, User, Calendar, Mail } from 'lucide-react';
+import { useAuthStore } from "@/lib/store";
+import { X, User, Calendar, Mail, Reply } from "lucide-react";
 
 export function MailDetailModal() {
-  const { selectedMail, setSelectedMail, currentFolder } = useAuthStore();
+  const { selectedMail, setSelectedMail, setReplyingToMail, currentFolder } =
+    useAuthStore();
 
   if (!selectedMail) return null;
+
+  const handleReply = () => {
+    setReplyingToMail(selectedMail);
+    setSelectedMail(null);
+  };
 
   return (
     <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
@@ -65,6 +71,13 @@ export function MailDetailModal() {
 
         {/* Footer */}
         <div className="p-6 border-t border-slate-100 flex justify-end gap-3 bg-white rounded-b-3xl">
+          <button
+            onClick={handleReply}
+            className="px-6 py-2.5 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 active:scale-95 transition-all shadow-lg shadow-blue-200 flex items-center gap-2"
+          >
+            <Reply size={18} />
+            답장하기
+          </button>
           <button
             onClick={() => setSelectedMail(null)}
             className="px-6 py-2.5 bg-slate-900 text-white rounded-xl font-bold hover:bg-black active:scale-95 transition-all shadow-lg shadow-slate-200"

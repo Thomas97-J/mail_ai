@@ -40,6 +40,7 @@ export interface MessageDetail {
 
 export interface ParsedMail {
   id: string;
+  threadId: string;
   subject: string;
   from: string;
   to: string;
@@ -114,6 +115,7 @@ export const parseMessage = (message: MessageDetail): ParsedMail => {
 
   return {
     id: message.id,
+    threadId: message.threadId,
     subject: getHeader("Subject"),
     from: getHeader("From"),
     to: getHeader("To"),
@@ -123,7 +125,11 @@ export const parseMessage = (message: MessageDetail): ParsedMail => {
   };
 };
 
-export const sendMail = async (accessToken: string, rawMime: string) => {
+export const sendMail = async (
+  accessToken: string,
+  rawMime: string,
+  threadId?: string,
+) => {
   // UTF-8 문자열을 Base64URL로 안전하게 인코딩
   const encoder = new TextEncoder();
   const data = encoder.encode(rawMime);
@@ -140,7 +146,10 @@ export const sendMail = async (accessToken: string, rawMime: string) => {
 
   const response = await axios.post(
     `${GMAIL_API_BASE}/messages/send`,
-    { raw: base64Url },
+    {
+      raw: base64Url,
+      ...(threadId && { threadId }),
+    },
     {
       headers: {
         Authorization: `Bearer ${accessToken}`,

@@ -1,4 +1,4 @@
-import OpenAI from 'openai';
+import OpenAI from "openai";
 
 const openai = new OpenAI({
   apiKey: process.env.NEXT_PUBLIC_OPENAI_API_KEY,
@@ -9,9 +9,237 @@ export interface AnalysisResult {
   errors: string[];
   improvements: string[];
   recommendedCCs: string[];
-  severity: 'Red' | 'Yellow' | 'Green';
-  improvedBody?: string;
+  severity: "Red" | "Yellow" | "Green";
 }
+
+type Severity = AnalysisResult["severity"];
+
+const severityRank: Record<Severity, number> = {
+  Red: 3,
+  Yellow: 2,
+  Green: 1,
+};
+
+const maxSeverity = (a: Severity, b: Severity): Severity =>
+  severityRank[a] >= severityRank[b] ? a : b;
+
+const uniqClean = (items: unknown[]): string[] => {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (typeof item !== "string") continue;
+    const v = item.trim();
+    if (!v) continue;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  return out;
+};
+
+const safeJsonParse = (text: string): unknown => {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(text.slice(start, end + 1));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+};
+
+const emailRegex =
+  /(?:^|[\s<("'])((?:[a-z0-9._%+-]+)@(?:[a-z0-9.-]+)\.[a-z]{2,})(?:$|[\s>)"'.;,])/gi;
+
+const extractEmails = (text: string): string[] => {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  let m: RegExpExecArray | null;
+  const lower = text.toLowerCase();
+  while ((m = emailRegex.exec(lower)) !== null) {
+    const v = m[1];
+    if (!seen.has(v)) {
+      seen.add(v);
+      out.push(v);
+    }
+  }
+  return out;
+};
+
+const normalizeSeverity = (value: unknown): Severity => {
+  if (value === "Red" || value === "Yellow" || value === "Green") return value;
+  if (typeof value !== "string") return "Green";
+  const v = value.toLowerCase();
+  if (
+    v.includes("red") ||
+    v.includes("위험") ||
+    v.includes("차단") ||
+    v.includes("high")
+  )
+    return "Red";
+  if (
+    v.includes("yellow") ||
+    v.includes("주의") ||
+    v.includes("검토") ||
+    v.includes("medium")
+  )
+    return "Yellow";
+  return "Green";
+};
+
+const normalizeAnalysis = (value: unknown): AnalysisResult => {
+  const obj =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  const errors = uniqClean(Array.isArray(obj.errors) ? obj.errors : []);
+  const improvements = uniqClean(
+    Array.isArray(obj.improvements) ? obj.improvements : [],
+  );
+  const recommendedCCs = uniqClean(
+    Array.isArray(obj.recommendedCCs) ? obj.recommendedCCs : [],
+  );
+  const severity = normalizeSeverity(obj.severity);
+  return { errors, improvements, recommendedCCs, severity };
+};
+
+const attachmentKeywords = [
+  "첨부",
+  "첨부파일",
+  "동봉",
+  "붙임",
+  "파일",
+  "pdf",
+  "zip",
+  "png",
+  "jpg",
+  "jpeg",
+  "doc",
+  "docx",
+  "ppt",
+  "pptx",
+  "xls",
+  "xlsx",
+  "attach",
+  "attachment",
+  "attached",
+  "enclosed",
+];
+
+const localAnalyze = (data: {
+  to: string;
+  cc?: string;
+  subject: string;
+  body: string;
+  hasAttachment: boolean;
+}): AnalysisResult => {
+  const errors: string[] = [];
+  const improvements: string[] = [];
+  const recommendedCCs: string[] = [];
+  let severity: Severity = "Green";
+
+  const toEmails = extractEmails(data.to);
+  if (toEmails.length === 0) {
+    errors.push("수신인(To) 이메일 형식을 확인해 주세요.");
+    severity = maxSeverity(severity, "Red");
+  }
+
+  const subject = data.subject.trim();
+  if (subject.length < 3) {
+    improvements.push(
+      "제목을 조금 더 구체적으로 작성해 주세요. (예: [요청] 견적 확인 / [공유] 회의록)",
+    );
+    severity = maxSeverity(severity, "Yellow");
+  }
+
+  const body = data.body.trim();
+  if (body.length < 30) {
+    improvements.push(
+      "본문이 너무 짧습니다. 요청/배경/기한/다음 액션을 한 문장씩 추가해 주세요.",
+    );
+    severity = maxSeverity(severity, "Yellow");
+  }
+
+  const lowerBody = body.toLowerCase();
+  const mentionedAttachment = attachmentKeywords.some((k) =>
+    lowerBody.includes(k),
+  );
+  if (mentionedAttachment && !data.hasAttachment) {
+    errors.push("본문에 첨부 언급이 있는데 첨부파일이 없습니다.");
+    severity = maxSeverity(severity, "Red");
+  }
+
+  if (data.hasAttachment && !mentionedAttachment) {
+    improvements.push(
+      "첨부파일이 있다면 본문에 첨부 설명(무엇/왜/버전)을 한 줄 추가하면 좋습니다.",
+    );
+    severity = maxSeverity(severity, "Yellow");
+  }
+
+  const piiSignals: Array<{ re: RegExp; msg: string; sev: Severity }> = [
+    {
+      re: /\b\d{6}-?\d{7}\b/,
+      msg: "주민등록번호 형태가 감지되었습니다. 발송 전 마스킹을 권장합니다.",
+      sev: "Red",
+    },
+    {
+      re: /\b(?:\d[ -]*?){13,16}\b/,
+      msg: "카드번호로 보일 수 있는 숫자열이 감지되었습니다. 발송 전 확인/마스킹을 권장합니다.",
+      sev: "Yellow",
+    },
+    {
+      re: /(비밀번호|password|otp|인증번호|2fa|one[- ]time)/i,
+      msg: "비밀번호/인증정보로 해석될 수 있는 표현이 감지되었습니다. 공유 여부를 재확인해 주세요.",
+      sev: "Red",
+    },
+    {
+      re: /(계좌|account|routing|swift|iban)/i,
+      msg: "계좌/송금 관련 정보가 포함되어 있을 수 있습니다. 수신인/도메인을 재확인해 주세요.",
+      sev: "Yellow",
+    },
+  ];
+  for (const s of piiSignals) {
+    if (s.re.test(body)) {
+      errors.push(s.msg);
+      severity = maxSeverity(severity, s.sev);
+    }
+  }
+
+  const rudeSignals: Array<{ re: RegExp; suggestion: string }> = [
+    {
+      re: /(빨리|당장|즉시|ASAP|urgent)/i,
+      suggestion: "긴급함을 표현할 때는 “가능한 일정”을 함께 제시해 주세요.",
+    },
+    {
+      re: /(왜 아직|이게 말이|당연히)/i,
+      suggestion:
+        "상대의 책임을 단정하는 표현은 완곡하게 바꾸는 것을 권장합니다.",
+    },
+  ];
+  for (const s of rudeSignals) {
+    if (s.re.test(body)) {
+      improvements.push(s.suggestion);
+      severity = maxSeverity(severity, "Yellow");
+    }
+  }
+
+  return {
+    errors: uniqClean(errors),
+    improvements: uniqClean(improvements),
+    recommendedCCs,
+    severity,
+  };
+};
+
+const cache = new Map<string, { at: number; result: AnalysisResult }>();
+const inflight = new Map<string, Promise<AnalysisResult>>();
+const CACHE_TTL_MS = 30_000;
 
 export const analyzeMail = async (data: {
   to: string;
@@ -20,58 +248,120 @@ export const analyzeMail = async (data: {
   body: string;
   hasAttachment: boolean;
 }): Promise<AnalysisResult> => {
-  if (!process.env.NEXT_PUBLIC_OPENAI_API_KEY) {
-    return {
-      errors: ['API 키가 설정되지 않았습니다.'],
-      improvements: [],
-      recommendedCCs: [],
-      severity: 'Yellow',
-    };
-  }
+  const local = localAnalyze(data);
+  const key = JSON.stringify({
+    to: data.to,
+    cc: data.cc ?? "",
+    subject: data.subject,
+    body: data.body,
+    hasAttachment: data.hasAttachment,
+  });
 
-  const prompt = `
-당신은 이메일 보안 및 비즈니스 매너 전문가인 '메일 가디언'입니다. 
-다음 이메일 내용을 분석하여 위험 요소, 개선 사항, 누락된 참조인을 제안해주세요.
+  const cached = cache.get(key);
+  if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.result;
 
-[이메일 정보]
-수신인: ${data.to}
-참조: ${data.cc || '없음'}
-제목: ${data.subject}
-본문: ${data.body}
-첨부파일 유무: ${data.hasAttachment ? '있음' : '없음'}
+  const existing = inflight.get(key);
+  if (existing) return existing;
 
-분석 결과는 반드시 다음 JSON 형식을 따라야 합니다:
-{
-  "errors": ["위험 요소 리스트 (예: 수신인 도메인 불일치, 민감 정보 포함 등)"],
-  "improvements": ["문장 개선 제안 리스트"],
-  "improvedBody": "모든 개선 사항과 매너가 적용된 전체 메일 본문 내용",
-  "recommendedCCs": ["추가하면 좋을 참조인 이메일 리스트"],
-  "severity": "Red(위험) | Yellow(주의) | Green(통과)"
-}
-`;
+  const run = (async (): Promise<AnalysisResult> => {
+    if (!process.env.NEXT_PUBLIC_OPENAI_API_KEY) {
+      const result: AnalysisResult = {
+        ...local,
+        errors: uniqClean([...local.errors, "API 키가 설정되지 않았습니다."]),
+        severity: maxSeverity(local.severity, "Yellow"),
+      };
+      cache.set(key, { at: Date.now(), result });
+      return result;
+    }
 
-  try {
-    const response = await openai.chat.completions.create({
-      model: 'gpt-5.4-nano',
-      messages: [{ role: 'system', content: prompt }],
-      response_format: { type: 'json_object' },
-    });
+    const model = process.env.NEXT_PUBLIC_OPENAI_MODEL || "gpt-5.4-nano";
 
-    const result = JSON.parse(response.choices[0].message.content || '{}');
-    return {
-      errors: result.errors || [],
-      improvements: result.improvements || [],
-      improvedBody: result.improvedBody || '',
-      recommendedCCs: result.recommendedCCs || [],
-      severity: result.severity || 'Green',
-    };
-  } catch (error) {
-    console.error('AI Analysis failed:', error);
-    return {
-      errors: ['AI 분석 중 오류가 발생했습니다.'],
-      improvements: [],
-      recommendedCCs: [],
-      severity: 'Yellow',
-    };
-  }
+    const system = [
+      "당신은 이메일 보안 및 비즈니스 매너 전문가인 '메일 가디언'입니다.",
+      "목표: 발송 전 실수/보안/업무 품질 리스크를 빠르게 잡아냅니다.",
+      "반드시 아래 JSON 형식만 출력합니다. 설명/마크다운/추가 필드는 금지합니다.",
+      "recommendedCCs는 이메일 주소만 허용합니다. 본문/수신인/참조에 실제로 등장한 주소만 포함합니다. 추측 금지.",
+      "severity는 Red|Yellow|Green 중 하나만 사용합니다.",
+      "severity 기준:",
+      "- Red: 발송 전 수정/확인 없이는 위험(매너/보안/오해 가능성이 큼).",
+      "- Yellow: 검토/개선 권장(큰 문제는 아니지만 인상/협업 품질을 해칠 수 있음).",
+      "- Green: 큰 이슈 없음.",
+      "매너/톤(비즈니스 이메일 etiquette) 규칙을 최우선으로 평가합니다.",
+      "매너 관련 Red 판정 예시(하나라도 해당하면 Red로 올립니다):",
+      "- 욕설/비하/모욕/혐오 표현, 인신공격, 협박/압박(“안 하면 불이익”, “책임질 거죠?” 등), 조롱/비꼼이 명확한 표현",
+      "- 과도한 공격/분노 표출(연속 느낌표/물음표, 전부 대문자, “말이 됩니까” 류의 강한 단정이 반복)",
+      "매너 관련 Yellow 판정 예시(해당하면 Yellow로 올립니다):",
+      "- 명령조/독촉(“빨리/당장/즉시/ASAP”), 상대 탓 단정(“왜 아직/당연히/이게 말이”), 과도한 책임 전가",
+      "- 요구사항/기한/다음 액션이 불명확해서 오해가 생길 수 있는 문장",
+      "- 지나치게 캐주얼/친한 톤이 업무 맥락에 부적절한 경우(상황에 따라)",
+      "개선 제안은 “바꿀 문장 → 권장 문장” 형태로 구체적으로 제시합니다(문자열 1개에 포함해도 됨).",
+      "검토 항목: 첨부 누락, 민감정보/인증정보, 수신인 부적절/형식 오류, 요청사항 불명확(기한/액션), 매너/톤 리스크, 제목/본문 품질.",
+    ].join("\n");
+
+    const user = [
+      "[이메일 정보]",
+      `수신인(To): ${data.to}`,
+      `참조(Cc): ${data.cc || "없음"}`,
+      `제목: ${data.subject}`,
+      `본문: ${data.body}`,
+      `첨부파일 유무: ${data.hasAttachment ? "있음" : "없음"}`,
+      "",
+      "[출력 JSON 스키마]",
+      "{",
+      '  "errors": string[],',
+      '  "improvements": string[],',
+      '  "recommendedCCs": string[],',
+      '  "severity": "Red" | "Yellow" | "Green"',
+      "}",
+    ].join("\n");
+
+    try {
+      const response = await openai.chat.completions.create({
+        model,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0.2,
+      });
+
+      const content = response.choices[0]?.message?.content ?? "";
+      const parsed = safeJsonParse(content);
+      const llm = normalizeAnalysis(parsed);
+
+      const allowedCc = new Set(
+        extractEmails(
+          `${data.to} ${data.cc ?? ""} ${data.subject} ${data.body}`,
+        ),
+      );
+      const filteredRecommended = llm.recommendedCCs
+        .map((v) => v.toLowerCase().trim())
+        .filter((v) => allowedCc.has(v));
+
+      const merged: AnalysisResult = {
+        errors: uniqClean([...local.errors, ...llm.errors]),
+        improvements: uniqClean([...local.improvements, ...llm.improvements]),
+        recommendedCCs: uniqClean(filteredRecommended),
+        severity: maxSeverity(local.severity, llm.severity),
+      };
+
+      cache.set(key, { at: Date.now(), result: merged });
+      return merged;
+    } catch (error) {
+      console.error("AI Analysis failed:", error);
+      const result: AnalysisResult = {
+        ...local,
+        errors: uniqClean([...local.errors, "AI 분석 중 오류가 발생했습니다."]),
+        severity: maxSeverity(local.severity, "Yellow"),
+      };
+      cache.set(key, { at: Date.now(), result });
+      return result;
+    } finally {
+      inflight.delete(key);
+    }
+  })();
+
+  inflight.set(key, run);
+  return run;
 };
