@@ -18,6 +18,7 @@ import {
   Paperclip,
   File,
   X as XIcon,
+  Wand2,
 } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
@@ -34,7 +35,7 @@ interface MailForm {
 }
 
 export function ComposeMail() {
-  const { register, watch, reset } = useForm<MailForm>();
+  const { register, watch, reset, setValue } = useForm<MailForm>();
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showReview, setShowReview] = useState(false);
@@ -110,6 +111,14 @@ export function ComposeMail() {
     setShowReview(true);
   };
 
+  const handleAutoFix = () => {
+    if (analysis?.improvedBody) {
+      setValue("body", analysis.improvedBody);
+      setShowReview(false);
+      alert("AI의 제안에 따라 본문이 수정되었습니다.");
+    }
+  };
+
   const onConfirmSend = async () => {
     if (!accessToken) return;
     setIsSending(true);
@@ -179,6 +188,8 @@ export function ComposeMail() {
           </label>
           <input
             {...register("to", { required: true })}
+            type="email"
+            autoComplete="email"
             className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all placeholder:text-slate-400 text-slate-900"
             placeholder="example@mail.com"
           />
@@ -189,6 +200,8 @@ export function ComposeMail() {
           </label>
           <input
             {...register("cc")}
+            type="email"
+            autoComplete="email"
             className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all placeholder:text-slate-400 text-slate-900"
             placeholder="cc@mail.com"
           />
@@ -403,8 +416,17 @@ export function ComposeMail() {
                 onClick={() => setShowReview(false)}
                 className="px-6 py-3 text-slate-600 font-bold hover:bg-slate-50 rounded-xl transition-all"
               >
-                닫고 수정하기
+                닫고 직접 수정
               </button>
+              {analysis.improvedBody && (
+                <button
+                  onClick={handleAutoFix}
+                  className="px-6 py-3 bg-blue-50 text-blue-600 border border-blue-200 rounded-xl font-bold hover:bg-blue-100 flex items-center justify-center gap-2 transition-all shadow-sm"
+                >
+                  <Wand2 size={18} />
+                  자동 수정 적용
+                </button>
+              )}
               <button
                 onClick={onConfirmSend}
                 disabled={isSending}

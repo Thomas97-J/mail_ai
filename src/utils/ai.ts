@@ -10,6 +10,7 @@ export interface AnalysisResult {
   improvements: string[];
   recommendedCCs: string[];
   severity: 'Red' | 'Yellow' | 'Green';
+  improvedBody?: string;
 }
 
 export const analyzeMail = async (data: {
@@ -43,6 +44,7 @@ export const analyzeMail = async (data: {
 {
   "errors": ["위험 요소 리스트 (예: 수신인 도메인 불일치, 민감 정보 포함 등)"],
   "improvements": ["문장 개선 제안 리스트"],
+  "improvedBody": "모든 개선 사항과 매너가 적용된 전체 메일 본문 내용",
   "recommendedCCs": ["추가하면 좋을 참조인 이메일 리스트"],
   "severity": "Red(위험) | Yellow(주의) | Green(통과)"
 }
@@ -59,6 +61,7 @@ export const analyzeMail = async (data: {
     return {
       errors: result.errors || [],
       improvements: result.improvements || [],
+      improvedBody: result.improvedBody || '',
       recommendedCCs: result.recommendedCCs || [],
       severity: result.severity || 'Green',
     };
