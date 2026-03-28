@@ -330,3 +330,112 @@ export const analyzeMail = async (data: {
   inflight.set(key, run);
   return run;
 };
+
+export interface AnalysisWithImprovedBody extends AnalysisResult {
+  improvedBody: string;
+}
+
+type RewriteResult = { improvedBody: string };
+
+const normalizeRewrite = (value: unknown, fallback: string): RewriteResult => {
+  const obj = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+  const improvedBody =
+    typeof obj.improvedBody === 'string' && obj.improvedBody.trim()
+      ? obj.improvedBody
+      : fallback;
+  return { improvedBody };
+};
+
+const rewriteCache = new Map<string, { at: number; result: RewriteResult }>();
+const rewriteInflight = new Map<string, Promise<RewriteResult>>();
+const REWRITE_CACHE_TTL_MS = 30_000;
+
+export const analyzeMailWithImprovedBody = async (data: {
+  to: string;
+  cc?: string;
+  subject: string;
+  body: string;
+  hasAttachment: boolean;
+}): Promise<AnalysisWithImprovedBody> => {
+  const analysis = await analyzeMail(data);
+
+  const rewriteKey = JSON.stringify({
+    to: data.to,
+    cc: data.cc ?? '',
+    subject: data.subject,
+    body: data.body,
+  });
+
+  const cached = rewriteCache.get(rewriteKey);
+  if (cached && Date.now() - cached.at < REWRITE_CACHE_TTL_MS) {
+    return { ...analysis, improvedBody: cached.result.improvedBody };
+  }
+
+  const existing = rewriteInflight.get(rewriteKey);
+  if (existing) {
+    const rewrite = await existing;
+    return { ...analysis, improvedBody: rewrite.improvedBody };
+  }
+
+  const run = (async (): Promise<RewriteResult> => {
+    if (!process.env.NEXT_PUBLIC_OPENAI_API_KEY) {
+      const result: RewriteResult = { improvedBody: data.body };
+      rewriteCache.set(rewriteKey, { at: Date.now(), result });
+      return result;
+    }
+
+    const model = process.env.NEXT_PUBLIC_OPENAI_MODEL || 'gpt-5.4-nano';
+
+    const system = [
+      "당신은 비즈니스 이메일 에디터입니다. 사용자의 본문을 '매너/명확성/협업 효율' 관점에서 개선합니다.",
+      '절대 새로운 사실을 추가하지 말고, 의미/수치/고유명사/일정은 보존합니다.',
+      '언어는 원문의 톤/언어(한국어/영어)를 유지합니다.',
+      '명령조/압박/책임 전가/무례한 표현은 완곡하고 전문적인 표현으로 바꿉니다.',
+      '가능하면 다음을 보강합니다: 목적, 요청사항, 기한/다음 액션, 감사/마무리 문장.',
+      '반드시 아래 JSON 형식만 출력합니다. 다른 텍스트는 금지합니다.',
+    ].join('\n');
+
+    const user = [
+      '[컨텍스트]',
+      `수신인(To): ${data.to}`,
+      `참조(Cc): ${data.cc || '없음'}`,
+      `제목: ${data.subject}`,
+      `첨부파일 유무: ${data.hasAttachment ? '있음' : '없음'}`,
+      '',
+      '[원문 본문]',
+      data.body,
+      '',
+      '[출력 JSON 스키마]',
+      '{ "improvedBody": string }',
+    ].join('\n');
+
+    try {
+      const response = await openai.chat.completions.create({
+        model,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.2,
+      });
+
+      const content = response.choices[0]?.message?.content ?? '';
+      const parsed = safeJsonParse(content);
+      const normalized = normalizeRewrite(parsed, data.body);
+      rewriteCache.set(rewriteKey, { at: Date.now(), result: normalized });
+      return normalized;
+    } catch (error) {
+      console.error('AI Rewrite failed:', error);
+      const result: RewriteResult = { improvedBody: data.body };
+      rewriteCache.set(rewriteKey, { at: Date.now(), result });
+      return result;
+    } finally {
+      rewriteInflight.delete(rewriteKey);
+    }
+  })();
+
+  rewriteInflight.set(rewriteKey, run);
+  const rewrite = await run;
+  return { ...analysis, improvedBody: rewrite.improvedBody };
+};
