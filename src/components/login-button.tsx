@@ -8,14 +8,27 @@ import { useCallback, useEffect } from "react";
 export function LoginButton() {
   const setAccessToken = useAuthStore((state) => state.setAccessToken);
 
+  const sanitizeGoogleClientId = (value: string): string => {
+    const v = value.trim();
+    if (
+      (v.startsWith('"') && v.endsWith('"')) ||
+      (v.startsWith("'") && v.endsWith("'"))
+    ) {
+      return v.slice(1, -1).trim();
+    }
+    return v;
+  };
+
   const startRedirectLogin = useCallback(() => {
-    const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
+    const clientId = sanitizeGoogleClientId(
+      process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "",
+    );
     if (!clientId) {
       alert("NEXT_PUBLIC_GOOGLE_CLIENT_ID가 설정되지 않았습니다.");
       return;
     }
 
-    const redirectUri = window.location.origin;
+    const redirectUri = `${window.location.origin}/`;
     const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
     url.searchParams.set("client_id", clientId);
     url.searchParams.set("redirect_uri", redirectUri);
