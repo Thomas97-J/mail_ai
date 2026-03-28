@@ -649,11 +649,13 @@ export const ghostWriteReplyDraft = async (
 
 export interface WatchdogTrackedMail {
   threadId: string;
+  messageId?: string;
   sentAtMs: number;
   dueAtMs: number;
   subject: string;
   to: string;
   from: string;
+  body?: string;
   notifiedAtMs?: number;
 }
 

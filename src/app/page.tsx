@@ -7,9 +7,136 @@ import { ComposeMail } from "@/components/compose-mail";
 import { Header } from "@/components/header";
 import { MailDetailModal } from "@/components/mail-detail-modal";
 import { ShieldAlert, CheckCircle2, ShieldCheck, Mail } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { fetchThreadDetail, parseThreadMessages } from "@/utils/gmail";
+import { watchdogEvaluateForReminderWithLLM } from "@/utils/ai";
 
 export default function Home() {
-  const accessToken = useAuthStore((state) => state.accessToken);
+  const {
+    accessToken,
+    watchdogTrackedMails,
+    watchdogReminders,
+    lastWatchdogRunAtMs,
+    setLastWatchdogRunAtMs,
+    upsertWatchdogReminder,
+    markWatchdogNotified,
+    removeWatchdogReminder,
+    removeWatchdogTrackedMail,
+    setWatchdogComposeDraft,
+  } = useAuthStore();
+
+  const [watchdogHiddenThreadIds, setWatchdogHiddenThreadIds] = useState<
+    Record<string, true>
+  >({});
+
+  const startOfDayMs = (ms: number) => {
+    const d = new Date(ms);
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  };
+
+  const [todayStartMs, setTodayStartMs] = useState(() =>
+    startOfDayMs(Date.now()),
+  );
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const next = startOfDayMs(Date.now());
+      setTodayStartMs((prev) => (prev === next ? prev : next));
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    if (!accessToken) return;
+    if (watchdogTrackedMails.length === 0) return;
+
+    const now = Date.now();
+    if (lastWatchdogRunAtMs && now - lastWatchdogRunAtMs < 6 * 60 * 60 * 1000) {
+      return;
+    }
+
+    let cancelled = false;
+    setLastWatchdogRunAtMs(now);
+
+    const run = async () => {
+      const todayStart = startOfDayMs(now);
+      const candidates = watchdogTrackedMails
+        .filter((m) => {
+          if (startOfDayMs(m.dueAtMs) > todayStart) return false;
+          if (!m.notifiedAtMs) return true;
+          return startOfDayMs(m.notifiedAtMs) !== todayStart;
+        })
+        .slice(0, 5);
+
+      for (const tracked of candidates) {
+        if (cancelled) return;
+        try {
+          const thread = await fetchThreadDetail(accessToken, tracked.threadId);
+          const threadMessages = parseThreadMessages(thread).map((m) => ({
+            internalDateMs: m.internalDateMs,
+            from: m.from,
+            subject: m.subject,
+            snippet: m.snippet,
+            body: m.body,
+          }));
+
+          const evaluation = await watchdogEvaluateForReminderWithLLM({
+            sent: {
+              threadId: tracked.threadId,
+              sentAtMs: tracked.sentAtMs,
+              subject: tracked.subject,
+              body: tracked.body ?? "",
+              to: tracked.to,
+              from: tracked.from,
+            },
+            threadMessages,
+            now: new Date(now),
+          });
+
+          if (evaluation.candidate && evaluation.draft) {
+            const reminder = {
+              threadId: evaluation.candidate.threadId,
+              dueAtMs: evaluation.candidate.dueAtMs,
+              subject: evaluation.candidate.subject,
+              to: evaluation.candidate.to,
+              from: evaluation.candidate.from,
+              reason: evaluation.candidate.reason,
+              draftSubject: evaluation.draft.draftSubject,
+              draftBody: evaluation.draft.draftBody,
+              createdAtMs: now,
+            };
+            upsertWatchdogReminder(reminder);
+            markWatchdogNotified(tracked.threadId, now);
+          }
+        } catch (err) {
+          console.error("Watchdog run failed:", err);
+        }
+      }
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    accessToken,
+    lastWatchdogRunAtMs,
+    markWatchdogNotified,
+    setLastWatchdogRunAtMs,
+    upsertWatchdogReminder,
+    watchdogTrackedMails,
+  ]);
+
+  const activeReminder = useMemo(() => {
+    const today = watchdogReminders.filter(
+      (r) =>
+        startOfDayMs(r.createdAtMs) === todayStartMs &&
+        !watchdogHiddenThreadIds[r.threadId],
+    );
+    if (today.length === 0) return null;
+    return today.sort((a, b) => a.dueAtMs - b.dueAtMs)[0];
+  }, [todayStartMs, watchdogHiddenThreadIds, watchdogReminders]);
 
   if (!accessToken) {
     return (
@@ -107,6 +234,125 @@ export default function Home() {
         </aside>
       </main>
       <MailDetailModal />
+      {activeReminder && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-3xl max-w-2xl w-full max-h-[85vh] overflow-y-auto shadow-2xl animate-in fade-in zoom-in duration-300 border border-slate-200">
+            <div className="flex items-center justify-between p-6 border-b border-slate-100">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-amber-50 rounded-xl text-amber-600">
+                  <ShieldAlert size={20} />
+                </div>
+                <div className="flex flex-col">
+                  <h3 className="text-lg font-black tracking-tight text-slate-900">
+                    답장 리마인드가 필요해요
+                  </h3>
+                  <p className="text-xs font-bold text-slate-500">
+                    {activeReminder.reason}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setWatchdogHiddenThreadIds((prev) => ({
+                    ...prev,
+                    [activeReminder.threadId]: true,
+                  }));
+                }}
+                className="px-3 py-1.5 text-xs font-bold text-slate-500 hover:text-slate-700 bg-slate-100 rounded-full transition-all"
+              >
+                닫기
+              </button>
+            </div>
+
+            <div className="p-6 flex flex-col gap-4">
+              <div className="p-4 rounded-2xl bg-slate-50 border border-slate-100">
+                <div className="text-xs font-black text-slate-500 uppercase tracking-wider">
+                  원본
+                </div>
+                <div className="mt-2 text-sm font-bold text-slate-900">
+                  {activeReminder.subject || "(제목 없음)"}
+                </div>
+                <div className="mt-1 text-xs font-medium text-slate-500">
+                  To: {activeReminder.to}
+                </div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-white border border-slate-200">
+                <div className="text-xs font-black text-slate-500 uppercase tracking-wider">
+                  리마인드 초안
+                </div>
+                <div className="mt-2 text-sm font-bold text-slate-900">
+                  {activeReminder.draftSubject}
+                </div>
+                <pre className="mt-3 whitespace-pre-wrap text-sm text-slate-700 font-medium leading-relaxed">
+                  {activeReminder.draftBody}
+                </pre>
+              </div>
+
+              <div className="flex flex-col sm:flex-row justify-end gap-3 pt-2">
+                <button
+                  onClick={() => {
+                    removeWatchdogTrackedMail(activeReminder.threadId);
+                    removeWatchdogReminder(activeReminder.threadId);
+                    setWatchdogHiddenThreadIds((prev) => ({
+                      ...prev,
+                      [activeReminder.threadId]: true,
+                    }));
+                  }}
+                  className="px-6 py-3 text-slate-600 font-bold hover:bg-slate-50 rounded-xl transition-all border border-slate-200 bg-white"
+                >
+                  추적 중단
+                </button>
+                <button
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(
+                        `${activeReminder.draftSubject}\n\n${activeReminder.draftBody}`,
+                      );
+                    } catch (err) {
+                      console.error(err);
+                    }
+                  }}
+                  className="px-6 py-3 text-slate-600 font-bold hover:bg-slate-50 rounded-xl transition-all border border-slate-200 bg-white"
+                >
+                  복사
+                </button>
+                <button
+                  onClick={() => {
+                    markWatchdogNotified(activeReminder.threadId, Date.now());
+                    removeWatchdogReminder(activeReminder.threadId);
+                    setWatchdogHiddenThreadIds((prev) => ({
+                      ...prev,
+                      [activeReminder.threadId]: true,
+                    }));
+                  }}
+                  className="px-6 py-3 text-slate-600 font-bold hover:bg-slate-50 rounded-xl transition-all border border-slate-200 bg-white"
+                >
+                  오늘은 무시
+                </button>
+                <button
+                  onClick={() => {
+                    setWatchdogComposeDraft({
+                      threadId: activeReminder.threadId,
+                      to: activeReminder.to,
+                      subject: activeReminder.draftSubject,
+                      body: activeReminder.draftBody,
+                    });
+                    removeWatchdogReminder(activeReminder.threadId);
+                    setWatchdogHiddenThreadIds((prev) => ({
+                      ...prev,
+                      [activeReminder.threadId]: true,
+                    }));
+                  }}
+                  className="px-8 py-3 bg-slate-900 text-white rounded-xl font-bold hover:bg-black active:scale-95 transition-all shadow-xl shadow-slate-200"
+                >
+                  초안으로 답장 작성
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

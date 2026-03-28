@@ -7,9 +7,14 @@ import {
   analyzeMailWithImprovedBody,
   AnalysisWithImprovedBody,
   ghostWriteReplyDraft,
+  watchdogEvaluateForReminderWithLLM,
 } from "@/utils/ai";
 import { generateRawMime, MailAttachment } from "@/utils/mime";
-import { sendMail } from "@/utils/gmail";
+import {
+  fetchMessageDetail,
+  parseMessageWithMeta,
+  sendMail,
+} from "@/utils/gmail";
 import { useAuthStore } from "@/lib/store";
 import {
   Send,
@@ -55,7 +60,14 @@ export function ComposeMail() {
   >("none");
   const [customIntent, setCustomIntent] = useState("");
   const [activeIntent, setActiveIntent] = useState("");
-  const { accessToken, replyingToMail, setReplyingToMail } = useAuthStore();
+  const {
+    accessToken,
+    replyingToMail,
+    setReplyingToMail,
+    watchdogComposeDraft,
+    setWatchdogComposeDraft,
+    upsertWatchdogTrackedMail,
+  } = useAuthStore();
   const lastAnalyzedRef = useRef<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -119,6 +131,30 @@ export function ComposeMail() {
       generateDraft();
     }
   }, [replyingToMail, replyIntent, activeIntent, setValue]);
+
+  useEffect(() => {
+    if (!watchdogComposeDraft) return;
+    lastAnalyzedRef.current = "";
+    setReplyingToMail(null);
+    setReplyIntent("none");
+    setCustomIntent("");
+    setActiveIntent("");
+    setValue("to", watchdogComposeDraft.to, { shouldValidate: true });
+    setValue("subject", watchdogComposeDraft.subject, { shouldValidate: true });
+    setValue("body", watchdogComposeDraft.body, { shouldValidate: true });
+  }, [watchdogComposeDraft, setReplyingToMail, setValue]);
+
+  const handleCancelWatchdogDraft = () => {
+    setWatchdogComposeDraft(null);
+    reset({
+      to: "",
+      cc: "",
+      subject: "",
+      body: "",
+    });
+    setAnalysis(null);
+    lastAnalyzedRef.current = "";
+  };
 
   const handleCancelReply = () => {
     setReplyingToMail(null);
@@ -242,17 +278,59 @@ export function ComposeMail() {
         body: formData.body,
         attachments: processedAttachments,
       });
-      await sendMail(
+      const sendResult = await sendMail(
         accessToken,
         rawMime,
-        replyingToMail ? replyingToMail.threadId : undefined,
+        replyingToMail
+          ? replyingToMail.threadId
+          : watchdogComposeDraft
+            ? watchdogComposeDraft.threadId
+            : undefined,
       );
+
+      try {
+        const threadId =
+          sendResult?.threadId ??
+          (replyingToMail ? replyingToMail.threadId : watchdogComposeDraft?.threadId);
+        const messageId = sendResult?.id;
+        if (threadId && messageId) {
+          const cleanBody = formData.body.split("--- Original Message ---")[0].trim();
+          const detail = await fetchMessageDetail(accessToken, messageId);
+          const parsed = parseMessageWithMeta(detail);
+          const evaluation = await watchdogEvaluateForReminderWithLLM({
+            sent: {
+              threadId,
+              sentAtMs: parsed.internalDateMs,
+              subject: formData.subject,
+              body: cleanBody,
+              to: formData.to,
+              from: parsed.from,
+            },
+            threadMessages: [],
+            now: new Date(parsed.internalDateMs),
+          });
+          if (evaluation.tracked) {
+            upsertWatchdogTrackedMail({
+              ...evaluation.tracked,
+              messageId,
+              body: cleanBody,
+              subject: formData.subject,
+              to: formData.to,
+              from: parsed.from,
+            });
+          }
+        }
+      } catch (err) {
+        console.error("Watchdog tracking failed:", err);
+      }
+
       alert("메일이 성공적으로 전송되었습니다!");
       setShowReview(false);
       reset(); // 폼 초기화
       setAnalysis(null); // 분석 결과 초기화
       setAttachments([]); // 첨부파일 초기화
       setReplyingToMail(null); // 답장 모드 초기화
+      setWatchdogComposeDraft(null); // 워치독 초안 초기화
       setReplyIntent("none"); // 의도 초기화
       setCustomIntent(""); // 커스텀 의도 초기화
       lastAnalyzedRef.current = ""; // 참조 초기화
@@ -297,6 +375,14 @@ export function ComposeMail() {
           )}
         </h2>
         <div className="flex items-center gap-3">
+          {watchdogComposeDraft && (
+            <button
+              onClick={handleCancelWatchdogDraft}
+              className="text-xs font-bold text-slate-500 hover:text-slate-700 px-3 py-1.5 bg-slate-100 rounded-full transition-all"
+            >
+              초안 취소
+            </button>
+          )}
           {replyingToMail && (
             <button
               onClick={handleCancelReply}

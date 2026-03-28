@@ -69,7 +69,7 @@ export function MailList() {
       };
       loadDetails();
     }
-  }, [data, accessToken, parsedMails.length]);
+  }, [data, accessToken, parsedMails]);
 
   if (status === "pending") {
     return (
