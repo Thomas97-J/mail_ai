@@ -3,7 +3,10 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { useForm } from "react-hook-form";
 import { debounce } from "lodash";
-import { analyzeMail, AnalysisResult } from "@/utils/ai";
+import {
+  analyzeMailWithImprovedBody,
+  AnalysisWithImprovedBody,
+} from "@/utils/ai";
 import { generateRawMime, MailAttachment } from "@/utils/mime";
 import { sendMail } from "@/utils/gmail";
 import { useAuthStore } from "@/lib/store";
@@ -19,6 +22,7 @@ import {
   File,
   X as XIcon,
   Reply,
+  Wand2,
 } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
@@ -36,7 +40,9 @@ interface MailForm {
 
 export function ComposeMail() {
   const { register, watch, reset, setValue } = useForm<MailForm>();
-  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [analysis, setAnalysis] = useState<AnalysisWithImprovedBody | null>(
+    null,
+  );
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showReview, setShowReview] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -96,7 +102,7 @@ export function ComposeMail() {
 
         setIsAnalyzing(true);
         try {
-          const result = await analyzeMail({
+          const result = await analyzeMailWithImprovedBody({
             to: data.to,
             cc: data.cc,
             subject: data.subject,
@@ -143,6 +149,14 @@ export function ComposeMail() {
 
   const handleSendClick = () => {
     setShowReview(true);
+  };
+
+  const handleAutoFix = () => {
+    if (analysis?.improvedBody) {
+      setValue("body", analysis.improvedBody);
+      setShowReview(false);
+      alert("AI의 제안에 따라 본문이 수정되었습니다.");
+    }
   };
 
   const onConfirmSend = async () => {
@@ -463,6 +477,15 @@ export function ComposeMail() {
               >
                 닫고 직접 수정
               </button>
+              {analysis.improvedBody && (
+                <button
+                  onClick={handleAutoFix}
+                  className="px-6 py-3 bg-blue-50 text-blue-600 border border-blue-200 rounded-xl font-bold hover:bg-blue-100 flex items-center justify-center gap-2 transition-all shadow-sm"
+                >
+                  <Wand2 size={18} />
+                  자동 수정 적용
+                </button>
+              )}
               <button
                 onClick={onConfirmSend}
                 disabled={isSending}
