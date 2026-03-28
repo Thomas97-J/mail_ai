@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useForm } from "react-hook-form";
 import { debounce } from "lodash";
 import { analyzeMail, AnalysisResult } from "@/utils/ai";
@@ -35,6 +35,7 @@ export function ComposeMail() {
     register,
     watch,
     handleSubmit,
+    reset,
     formState: { errors },
   } = useForm<MailForm>();
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
@@ -42,13 +43,23 @@ export function ComposeMail() {
   const [showReview, setShowReview] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const accessToken = useAuthStore((state) => state.accessToken);
+  const lastAnalyzedRef = useRef<string>("");
 
   const formData = watch();
 
   const debouncedAnalyze = useMemo(
     () =>
       debounce(async (data: MailForm) => {
-        if (!data.to || !data.subject || !data.body) return;
+        const contentKey = JSON.stringify(data);
+        if (!data.to || !data.subject || !data.body) {
+          setAnalysis(null);
+          lastAnalyzedRef.current = "";
+          return;
+        }
+
+        // 이전 분석 내용과 동일하면 스킵
+        if (contentKey === lastAnalyzedRef.current) return;
+
         setIsAnalyzing(true);
         try {
           const result = await analyzeMail({
@@ -56,9 +67,10 @@ export function ComposeMail() {
             cc: data.cc,
             subject: data.subject,
             body: data.body,
-            hasAttachment: false, // For now, simplified
+            hasAttachment: false,
           });
           setAnalysis(result);
+          lastAnalyzedRef.current = contentKey;
         } catch (err) {
           console.error(err);
         } finally {
@@ -90,6 +102,9 @@ export function ComposeMail() {
       await sendMail(accessToken, rawMime);
       alert("메일이 성공적으로 전송되었습니다!");
       setShowReview(false);
+      reset(); // 폼 초기화
+      setAnalysis(null); // 분석 결과 초기화
+      lastAnalyzedRef.current = ""; // 참조 초기화
     } catch (err) {
       console.error(err);
       alert("메일 전송 중 오류가 발생했습니다.");

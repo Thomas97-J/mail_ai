@@ -120,9 +120,23 @@ export const parseMessage = (message: MessageDetail): ParsedMail => {
 };
 
 export const sendMail = async (accessToken: string, rawMime: string) => {
+  // UTF-8 문자열을 Base64URL로 안전하게 인코딩
+  const encoder = new TextEncoder();
+  const data = encoder.encode(rawMime);
+  let binary = "";
+  const bytes = new Uint8Array(data);
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  const base64 = btoa(binary);
+  const base64Url = base64
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
   const response = await axios.post(
     `${GMAIL_API_BASE}/messages/send`,
-    { raw: btoa(rawMime).replace(/\+/g, "-").replace(/\//g, "_") },
+    { raw: base64Url },
     {
       headers: {
         Authorization: `Bearer ${accessToken}`,
