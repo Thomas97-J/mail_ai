@@ -42,6 +42,7 @@ export interface ParsedMail {
   id: string;
   subject: string;
   from: string;
+  to: string;
   date: string;
   snippet: string;
   body: string;
@@ -50,12 +51,14 @@ export interface ParsedMail {
 export const fetchMessages = async (
   accessToken: string,
   pageToken?: string,
+  labelId: string = "INBOX",
 ) => {
   const response = await axios.get(`${GMAIL_API_BASE}/messages`, {
     headers: { Authorization: `Bearer ${accessToken}` },
     params: {
       maxResults: 10,
       pageToken,
+      labelIds: labelId,
     },
   });
   return response.data;
@@ -113,6 +116,7 @@ export const parseMessage = (message: MessageDetail): ParsedMail => {
     id: message.id,
     subject: getHeader("Subject"),
     from: getHeader("From"),
+    to: getHeader("To"),
     date: new Date(parseInt(message.internalDate)).toLocaleString(),
     snippet: message.snippet,
     body: getBody(message.payload),

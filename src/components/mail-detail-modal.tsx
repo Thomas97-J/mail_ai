@@ -4,7 +4,7 @@ import { useAuthStore } from '@/lib/store';
 import { X, User, Calendar, Mail } from 'lucide-react';
 
 export function MailDetailModal() {
-  const { selectedMail, setSelectedMail } = useAuthStore();
+  const { selectedMail, setSelectedMail, currentFolder } = useAuthStore();
 
   if (!selectedMail) return null;
 
@@ -15,10 +15,10 @@ export function MailDetailModal() {
         <div className="flex items-center justify-between p-6 border-b border-slate-100">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-blue-50 rounded-xl text-blue-600">
-              <Mail size={20} />
+              {currentFolder === "INBOX" ? <Mail size={20} /> : <User size={20} />}
             </div>
             <h3 className="text-xl font-black tracking-tight text-slate-900 line-clamp-1">
-              {selectedMail.subject || '(제목 없음)'}
+              {selectedMail.subject || "(제목 없음)"}
             </h3>
           </div>
           <button
@@ -33,9 +33,20 @@ export function MailDetailModal() {
         <div className="px-8 py-6 bg-slate-50/50 flex flex-col gap-3">
           <div className="flex items-center gap-3 text-sm text-slate-600">
             <User size={16} className="text-slate-400" />
-            <span className="font-bold text-slate-900">보낸 사람:</span>
-            <span className="font-medium">{selectedMail.from}</span>
+            <span className="font-bold text-slate-900">
+              {currentFolder === "INBOX" ? "보낸 사람:" : "받는 사람:"}
+            </span>
+            <span className="font-medium">
+              {currentFolder === "INBOX" ? selectedMail.from : selectedMail.to}
+            </span>
           </div>
+          {currentFolder === "SENT" && selectedMail.from && (
+            <div className="flex items-center gap-3 text-sm text-slate-600">
+              <User size={16} className="text-slate-400" />
+              <span className="font-bold text-slate-900">보낸 사람:</span>
+              <span className="font-medium">{selectedMail.from}</span>
+            </div>
+          )}
           <div className="flex items-center gap-3 text-sm text-slate-600">
             <Calendar size={16} className="text-slate-400" />
             <span className="font-bold text-slate-900">날짜:</span>
