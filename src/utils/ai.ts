@@ -474,3 +474,138 @@ export const analyzeMailWithImprovedBody = async (data: {
   const rewrite = await run;
   return { ...analysis, improvedBody: rewrite.improvedBody };
 };
+
+export interface GhostWriterDraft {
+  draftSubject: string;
+  draftBody: string;
+}
+
+export interface GhostWriterInput {
+  originalFrom: string;
+  originalTo?: string;
+  originalCc?: string;
+  originalSubject: string;
+  originalBody: string;
+  myContext?: string;
+  intent?: string;
+}
+
+const normalizeGhostDraft = (
+  value: unknown,
+  fallbackSubject: string,
+  fallbackBody: string,
+): GhostWriterDraft => {
+  const obj =
+    value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const draftSubjectRaw =
+    typeof obj.draftSubject === "string" ? obj.draftSubject.trim() : "";
+  const draftBodyRaw = typeof obj.draftBody === "string" ? obj.draftBody : "";
+  const draftSubject = draftSubjectRaw || fallbackSubject;
+  const draftBody = draftBodyRaw.trim() ? draftBodyRaw : fallbackBody;
+  return { draftSubject, draftBody };
+};
+
+const ensureRePrefix = (subject: string): string => {
+  const s = subject.trim();
+  if (!s) return "Re:";
+  if (/^\s*re\s*:/i.test(s)) return s;
+  return `Re: ${s}`;
+};
+
+const ghostCache = new Map<string, { at: number; result: GhostWriterDraft }>();
+const ghostInflight = new Map<string, Promise<GhostWriterDraft>>();
+const GHOST_CACHE_TTL_MS = 30_000;
+
+export const ghostWriteReplyDraft = async (
+  input: GhostWriterInput,
+): Promise<GhostWriterDraft> => {
+  const key = JSON.stringify({
+    originalFrom: input.originalFrom,
+    originalTo: input.originalTo ?? "",
+    originalCc: input.originalCc ?? "",
+    originalSubject: input.originalSubject,
+    originalBody: input.originalBody,
+    myContext: input.myContext ?? "",
+    intent: input.intent ?? "",
+  });
+
+  const cached = ghostCache.get(key);
+  if (cached && Date.now() - cached.at < GHOST_CACHE_TTL_MS) return cached.result;
+
+  const existing = ghostInflight.get(key);
+  if (existing) return existing;
+
+  const run = (async (): Promise<GhostWriterDraft> => {
+    const fallbackSubject = ensureRePrefix(input.originalSubject);
+    const fallbackBody = `안녕하세요,\n\n메일 확인했습니다.\n\n확인 후 회신드리겠습니다.\n\n감사합니다.`;
+
+    if (!process.env.NEXT_PUBLIC_OPENAI_API_KEY) {
+      const result = { draftSubject: fallbackSubject, draftBody: fallbackBody };
+      ghostCache.set(key, { at: Date.now(), result });
+      return result;
+    }
+
+    const model = process.env.NEXT_PUBLIC_OPENAI_MODEL || "gpt-5.4-nano";
+
+    const system = [
+      "당신은 비즈니스 이메일 '고스트 라이터(Ghost Writer)'입니다.",
+      "사용자가 받은 이메일에 대한 답장 초안을 작성합니다.",
+      "원문 이메일에 없는 사실/수치/약속/일정을 절대 만들어내지 않습니다. 불확실하면 질문 형태로 남깁니다.",
+      "무례/압박/명령조/책임 전가가 생기지 않도록 전문적이고 정중한 톤을 유지합니다.",
+      "원문의 언어(한국어/영어)를 유지합니다.",
+      "답장 본문에는 불필요한 장문 인용(quote) 없이, 바로 보낼 수 있는 형태로 작성합니다.",
+      "반드시 아래 JSON 형식만 출력합니다. 다른 텍스트는 금지합니다.",
+    ].join("\n");
+
+    const user = [
+      "[원문 이메일]",
+      `From: ${input.originalFrom}`,
+      `To: ${input.originalTo || ""}`,
+      `Cc: ${input.originalCc || ""}`,
+      `Subject: ${input.originalSubject}`,
+      "",
+      input.originalBody,
+      "",
+      "[내 컨텍스트(있으면 반영)]",
+      input.myContext || "",
+      "",
+      "[의도/요청(있으면 반영)]",
+      input.intent || "",
+      "",
+      "[출력 JSON 스키마]",
+      '{ "draftSubject": string, "draftBody": string }',
+    ].join("\n");
+
+    try {
+      const response = await openai.chat.completions.create({
+        model,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0.2,
+      });
+
+      const content = response.choices[0]?.message?.content ?? "";
+      const parsed = safeJsonParse(content);
+      const normalized = normalizeGhostDraft(
+        parsed,
+        fallbackSubject,
+        fallbackBody,
+      );
+      ghostCache.set(key, { at: Date.now(), result: normalized });
+      return normalized;
+    } catch (error) {
+      console.error("Ghost Writer failed:", error);
+      const result = { draftSubject: fallbackSubject, draftBody: fallbackBody };
+      ghostCache.set(key, { at: Date.now(), result });
+      return result;
+    } finally {
+      ghostInflight.delete(key);
+    }
+  })();
+
+  ghostInflight.set(key, run);
+  return run;
+};
