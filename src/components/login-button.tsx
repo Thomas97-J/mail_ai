@@ -3,10 +3,14 @@
 import { useGoogleLogin } from "@react-oauth/google";
 import { useAuthStore } from "@/lib/store";
 import { LogIn } from "lucide-react";
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 export function LoginButton() {
   const setAccessToken = useAuthStore((state) => state.setAccessToken);
+  const [isNoticeOpen, setIsNoticeOpen] = useState(false);
+  const testAccountEmail = (process.env.NEXT_PUBLIC_TEST_ACCOUNT_EMAIL || "")
+    .trim()
+    .replace(/^["']|["']$/g, "");
 
   const sanitizeGoogleClientId = (value: string): string => {
     const v = value.trim();
@@ -70,7 +74,6 @@ export function LoginButton() {
 
   const login = useGoogleLogin({
     onSuccess: (tokenResponse) => {
-      console.log("Login Success:", tokenResponse);
       setAccessToken(tokenResponse.access_token);
     },
     onError: (errorResponse) => {
@@ -97,12 +100,100 @@ export function LoginButton() {
   });
 
   return (
-    <button
-      onClick={() => login()}
-      className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
-    >
-      <LogIn size={18} />
-      Google로 로그인
-    </button>
+    <>
+      <button
+        onClick={() => setIsNoticeOpen(true)}
+        className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+      >
+        <LogIn size={18} />
+        Google로 로그인
+      </button>
+
+      {isNoticeOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50"
+        >
+          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="p-6 border-b border-slate-100">
+              <h2 className="text-lg font-black tracking-tight text-slate-900">
+                테스트 계정 안내
+              </h2>
+              <p className="mt-2 text-sm font-medium text-slate-600 leading-relaxed">
+                데모 환경에서는 사전에 허가된 계정만 사용 가능합니다.
+              </p>
+            </div>
+
+            <div className="p-6 grid gap-3">
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="mt-2 text-sm text-slate-700 font-medium leading-relaxed">
+                  {testAccountEmail ? (
+                    <div className="grid gap-2">
+                      <div className="flex items-center justify-between gap-3 p-3 bg-white rounded-lg border border-slate-200">
+                        <div className="min-w-0">
+                          <div className="text-[11px] font-black text-slate-500 uppercase tracking-wider">
+                            테스트 계정 (이메일)
+                          </div>
+                          <div className="mt-1 text-sm font-bold text-slate-900 truncate">
+                            {testAccountEmail}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(
+                                testAccountEmail,
+                              );
+                            } catch (err) {
+                              console.error(err);
+                            }
+                          }}
+                          className="px-3 py-2 text-xs font-black text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-all whitespace-nowrap"
+                        >
+                          복사
+                        </button>
+                      </div>
+                      <div className="text-xs text-slate-600 font-medium leading-relaxed">
+                        계정 : thomas.test.0328@gmail.com
+                        <br />
+                        비밀번호 : 1q2w3e4r0328
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      계정 : thomas.test.0328@gmail.com
+                      <br />
+                      비밀번호 : 1q2w3e4r0328
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6 pt-0 flex flex-col sm:flex-row gap-3 sm:justify-end">
+              <button
+                type="button"
+                onClick={() => setIsNoticeOpen(false)}
+                className="px-6 py-3 text-slate-600 font-bold hover:bg-slate-50 rounded-xl transition-all border border-slate-200 bg-white"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsNoticeOpen(false);
+                  login();
+                }}
+                className="px-8 py-3 bg-slate-900 text-white rounded-xl font-bold hover:bg-black active:scale-95 transition-all shadow-xl shadow-slate-200"
+              >
+                확인했어요, 로그인 진행
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

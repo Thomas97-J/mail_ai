@@ -7,7 +7,7 @@ import { ComposeMail } from "@/components/compose-mail";
 import { Header } from "@/components/header";
 import { MailDetailModal } from "@/components/mail-detail-modal";
 import { ShieldAlert, CheckCircle2, ShieldCheck, Mail } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchThreadDetail, parseThreadMessages } from "@/utils/gmail";
 import { watchdogEvaluateForReminderWithLLM } from "@/utils/ai";
 
@@ -24,6 +24,59 @@ export default function Home() {
     removeWatchdogTrackedMail,
     setWatchdogComposeDraft,
   } = useAuthStore();
+
+  const [notificationPermission, setNotificationPermission] = useState<
+    NotificationPermission | "unsupported"
+  >(() => {
+    if (typeof window === "undefined") return "unsupported";
+    if (!("Notification" in window)) return "unsupported";
+    return Notification.permission;
+  });
+
+  const notifiedThreadIdsRef = useRef<Set<string>>(new Set());
+
+  const requestNotificationPermission = useCallback(async () => {
+    if (typeof window === "undefined") return;
+    if (!("Notification" in window)) {
+      setNotificationPermission("unsupported");
+      alert("이 브라우저는 알림을 지원하지 않습니다.");
+      return;
+    }
+
+    const result = await Notification.requestPermission();
+    setNotificationPermission(result);
+    if (result !== "granted") {
+      alert("알림이 허용되지 않았습니다. 브라우저 설정에서 허용해 주세요.");
+    }
+  }, []);
+
+  const maybeNotify = useCallback(
+    (reminder: {
+      threadId: string;
+      subject: string;
+      reason: string;
+      to: string;
+      draftSubject: string;
+      draftBody: string;
+    }) => {
+      if (typeof window === "undefined") return;
+      if (!("Notification" in window)) return;
+      if (Notification.permission !== "granted") return;
+      if (notifiedThreadIdsRef.current.has(reminder.threadId)) return;
+
+      notifiedThreadIdsRef.current.add(reminder.threadId);
+      const n = new Notification("Mail Guardian: 답장 리마인드", {
+        body: `${reminder.reason}\n${reminder.subject}`,
+        tag: reminder.threadId,
+        icon: "/favicon.ico",
+      });
+
+      n.onclick = () => {
+        window.focus();
+      };
+    },
+    [],
+  );
 
   const [watchdogHiddenThreadIds, setWatchdogHiddenThreadIds] = useState<
     Record<string, true>
@@ -108,6 +161,7 @@ export default function Home() {
             };
             upsertWatchdogReminder(reminder);
             markWatchdogNotified(tracked.threadId, now);
+            maybeNotify(reminder);
           }
         } catch (err) {
           console.error("Watchdog run failed:", err);
@@ -123,6 +177,7 @@ export default function Home() {
     accessToken,
     lastWatchdogRunAtMs,
     markWatchdogNotified,
+    maybeNotify,
     setLastWatchdogRunAtMs,
     upsertWatchdogReminder,
     watchdogTrackedMails,
@@ -195,7 +250,7 @@ export default function Home() {
         </div>
         <p className="mt-8 text-slate-400 text-sm font-bold">
           Powered by <span className="text-slate-600">Next.js 16</span> &{" "}
-          <span className="text-slate-600">GPT-4o</span>
+          <span className="text-slate-600">AI</span>
         </p>
       </main>
     );
@@ -249,6 +304,15 @@ export default function Home() {
                   <p className="text-xs font-bold text-slate-500">
                     {activeReminder.reason}
                   </p>
+                  {notificationPermission !== "granted" && (
+                    <button
+                      type="button"
+                      onClick={requestNotificationPermission}
+                      className="mt-2 w-fit px-3 py-1.5 text-[11px] font-black text-purple-600 hover:text-purple-700 bg-purple-50 hover:bg-purple-100 rounded-lg border border-purple-100 transition-all uppercase tracking-tighter"
+                    >
+                      알림 허용
+                    </button>
+                  )}
                 </div>
               </div>
               <button

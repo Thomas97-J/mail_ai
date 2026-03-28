@@ -291,10 +291,14 @@ export function ComposeMail() {
       try {
         const threadId =
           sendResult?.threadId ??
-          (replyingToMail ? replyingToMail.threadId : watchdogComposeDraft?.threadId);
+          (replyingToMail
+            ? replyingToMail.threadId
+            : watchdogComposeDraft?.threadId);
         const messageId = sendResult?.id;
         if (threadId && messageId) {
-          const cleanBody = formData.body.split("--- Original Message ---")[0].trim();
+          const cleanBody = formData.body
+            .split("--- Original Message ---")[0]
+            .trim();
           const detail = await fetchMessageDetail(accessToken, messageId);
           const parsed = parseMessageWithMeta(detail);
           const evaluation = await watchdogEvaluateForReminderWithLLM({
@@ -357,8 +361,8 @@ export function ComposeMail() {
 
   return (
     <div className="flex flex-col gap-6 p-8 border border-slate-200 rounded-2xl bg-white shadow-sm ring-1 ring-slate-900/5">
-      <div className="flex items-center justify-between border-b border-slate-100 pb-6">
-        <h2 className="text-2xl font-bold tracking-tight text-slate-900 flex items-center gap-3">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b border-slate-100 pb-6">
+        <h2 className="text-2xl font-bold tracking-tight text-slate-900 flex items-center gap-3 min-w-0">
           <div className="p-2 bg-blue-50 rounded-lg">
             {replyingToMail ? (
               <Reply size={22} className="text-blue-600" />
@@ -366,15 +370,17 @@ export function ComposeMail() {
               <Send size={22} className="text-blue-600" />
             )}
           </div>
-          {replyingToMail ? "메일 답장" : "메일 작성"}
+          <span className="truncate">
+            {replyingToMail ? "메일 답장" : "메일 작성"}
+          </span>
           {isGeneratingDraft && (
-            <div className="flex items-center gap-2 px-2.5 py-1 bg-purple-50 text-purple-600 text-[10px] font-black rounded-lg border border-purple-100 animate-pulse ml-2 uppercase tracking-wider">
+            <div className="flex items-center gap-2 px-2.5 py-1 bg-purple-50 text-purple-600 text-[10px] font-black rounded-lg border border-purple-100 animate-pulse uppercase tracking-wider whitespace-nowrap shrink-0">
               <Sparkles size={12} />
               AI Draft Generating...
             </div>
           )}
         </h2>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap justify-end">
           {watchdogComposeDraft && (
             <button
               onClick={handleCancelWatchdogDraft}
