@@ -6,6 +6,7 @@ import { debounce } from "lodash";
 import {
   analyzeMailWithImprovedBody,
   AnalysisWithImprovedBody,
+  ghostWriteReplyDraft,
 } from "@/utils/ai";
 import { generateRawMime, MailAttachment } from "@/utils/mime";
 import { sendMail } from "@/utils/gmail";
@@ -23,6 +24,7 @@ import {
   X as XIcon,
   Reply,
   Wand2,
+  Sparkles,
 } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
@@ -44,39 +46,85 @@ export function ComposeMail() {
     null,
   );
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isGeneratingDraft, setIsGeneratingDraft] = useState(false);
   const [showReview, setShowReview] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [attachments, setAttachments] = useState<File[]>([]);
+  const [replyIntent, setReplyIntent] = useState<
+    "none" | "positive" | "negative" | "custom"
+  >("none");
+  const [customIntent, setCustomIntent] = useState("");
+  const [debouncedCustomIntent, setDebouncedCustomIntent] = useState("");
   const { accessToken, replyingToMail, setReplyingToMail } = useAuthStore();
   const lastAnalyzedRef = useRef<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const formData = watch();
 
-  // 답장 모드 처리
+  // 커스텀 의도 데바운스
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedCustomIntent(customIntent);
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [customIntent]);
+
+  // 답장 모드 처리 (고스트 라이터 초안 작성 포함)
   useEffect(() => {
     if (replyingToMail) {
-      const subject = replyingToMail.subject.startsWith("Re:")
-        ? replyingToMail.subject
-        : `Re: ${replyingToMail.subject}`;
+      const generateDraft = async () => {
+        setIsGeneratingDraft(true);
+        try {
+          // 이메일 주소만 추출 (이름 제외)
+          const toEmail =
+            replyingToMail.from.match(/<(.+)>/)?.[1] || replyingToMail.from;
 
-      // 이메일 주소만 추출 (이름 제외)
-      const toEmail =
-        replyingToMail.from.match(/<(.+)>/)?.[1] || replyingToMail.from;
+          let intent = "";
+          if (replyIntent === "positive")
+            intent = "긍정적인 답변 (수락, 감사, 동의)";
+          else if (replyIntent === "negative")
+            intent = "거절하는 답변 (정중한 거절, 사과, 불가)";
+          else if (replyIntent === "custom") intent = debouncedCustomIntent;
 
-      const formattedOriginalBody = `\n\n--- Original Message ---\nFrom: ${replyingToMail.from}\nDate: ${replyingToMail.date}\nSubject: ${replyingToMail.subject}\n\n${replyingToMail.body || replyingToMail.snippet}`;
+          const draft = await ghostWriteReplyDraft({
+            originalFrom: replyingToMail.from,
+            originalTo: replyingToMail.to,
+            originalSubject: replyingToMail.subject,
+            originalBody: replyingToMail.body || replyingToMail.snippet,
+            intent,
+          });
 
-      setValue("to", toEmail);
-      setValue("subject", subject);
-      setValue("body", formattedOriginalBody);
+          const formattedOriginalBody = `\n\n--- Original Message ---\nFrom: ${replyingToMail.from}\nDate: ${replyingToMail.date}\nSubject: ${replyingToMail.subject}\n\n${replyingToMail.body || replyingToMail.snippet}`;
 
-      // 포커스를 본문 처음에 두기 위해 (브라우저 기본 동작 지원 시)
-      // 실제로는 수동으로 커서 위치 조정이 필요할 수 있지만 일단 데이터만 세팅
+          setValue("to", toEmail);
+          setValue("subject", draft.draftSubject);
+          setValue("body", `${draft.draftBody}${formattedOriginalBody}`);
+        } catch (err) {
+          console.error("Failed to generate draft:", err);
+          // 실패 시 기본 수동 세팅 유지
+          const toEmail =
+            replyingToMail.from.match(/<(.+)>/)?.[1] || replyingToMail.from;
+          const subject = replyingToMail.subject.startsWith("Re:")
+            ? replyingToMail.subject
+            : `Re: ${replyingToMail.subject}`;
+          const formattedOriginalBody = `\n\n--- Original Message ---\nFrom: ${replyingToMail.from}\nDate: ${replyingToMail.date}\nSubject: ${replyingToMail.subject}\n\n${replyingToMail.body || replyingToMail.snippet}`;
+
+          setValue("to", toEmail);
+          setValue("subject", subject);
+          setValue("body", `안녕하세요,\n\n${formattedOriginalBody}`);
+        } finally {
+          setIsGeneratingDraft(false);
+        }
+      };
+
+      generateDraft();
     }
-  }, [replyingToMail, setValue]);
+  }, [replyingToMail, replyIntent, debouncedCustomIntent, setValue]);
 
   const handleCancelReply = () => {
     setReplyingToMail(null);
+    setReplyIntent("none");
+    setCustomIntent("");
     reset({
       to: "",
       cc: "",
@@ -189,6 +237,8 @@ export function ComposeMail() {
       setAnalysis(null); // 분석 결과 초기화
       setAttachments([]); // 첨부파일 초기화
       setReplyingToMail(null); // 답장 모드 초기화
+      setReplyIntent("none"); // 의도 초기화
+      setCustomIntent(""); // 커스텀 의도 초기화
       lastAnalyzedRef.current = ""; // 참조 초기화
     } catch (err) {
       console.error(err);
@@ -223,6 +273,12 @@ export function ComposeMail() {
             )}
           </div>
           {replyingToMail ? "메일 답장" : "메일 작성"}
+          {isGeneratingDraft && (
+            <div className="flex items-center gap-2 px-2.5 py-1 bg-purple-50 text-purple-600 text-[10px] font-black rounded-lg border border-purple-100 animate-pulse ml-2 uppercase tracking-wider">
+              <Sparkles size={12} />
+              AI Draft Generating...
+            </div>
+          )}
         </h2>
         <div className="flex items-center gap-3">
           {replyingToMail && (
@@ -239,6 +295,66 @@ export function ComposeMail() {
           </div>
         </div>
       </div>
+
+      {replyingToMail && (
+        <div className="flex flex-col gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-100 mb-2 animate-in fade-in slide-in-from-top-4 duration-300">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-black text-slate-500 uppercase tracking-wider flex items-center gap-2">
+              <Sparkles size={14} className="text-purple-500" />
+              답장 의도 선택 (AI 초안 생성용)
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setReplyIntent("positive")}
+              className={cn(
+                "px-4 py-2 rounded-xl text-xs font-bold transition-all border",
+                replyIntent === "positive"
+                  ? "bg-emerald-600 text-white border-emerald-600 shadow-md shadow-emerald-200"
+                  : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50",
+              )}
+            >
+              👍 긍정/수락
+            </button>
+            <button
+              type="button"
+              onClick={() => setReplyIntent("negative")}
+              className={cn(
+                "px-4 py-2 rounded-xl text-xs font-bold transition-all border",
+                replyIntent === "negative"
+                  ? "bg-red-600 text-white border-red-600 shadow-md shadow-red-200"
+                  : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50",
+              )}
+            >
+              👎 거절/부정
+            </button>
+            <button
+              type="button"
+              onClick={() => setReplyIntent("custom")}
+              className={cn(
+                "px-4 py-2 rounded-xl text-xs font-bold transition-all border",
+                replyIntent === "custom"
+                  ? "bg-purple-600 text-white border-purple-600 shadow-md shadow-purple-200"
+                  : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50",
+              )}
+            >
+              ✍️ 직접 입력
+            </button>
+          </div>
+          {replyIntent === "custom" && (
+            <div className="mt-2">
+              <input
+                type="text"
+                value={customIntent}
+                onChange={(e) => setCustomIntent(e.target.value)}
+                placeholder="예: 회의 시간을 내일 오후 2시로 조정하고 싶어"
+                className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-xs font-medium focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 outline-none transition-all shadow-sm"
+              />
+            </div>
+          )}
+        </div>
+      )}
 
       <form className="flex flex-col gap-5">
         <div className="grid gap-2">
@@ -275,10 +391,22 @@ export function ComposeMail() {
             placeholder="메일 제목을 입력하세요"
           />
         </div>
-        <div className="grid gap-2">
+        <div className="grid gap-2 relative">
           <label className="text-sm font-semibold text-slate-700 ml-1">
             본문
           </label>
+          {isGeneratingDraft && (
+            <div className="absolute inset-0 top-7 bg-white/50 backdrop-blur-[1px] z-10 flex items-center justify-center rounded-xl border border-dashed border-purple-200">
+              <div className="flex flex-col items-center gap-2">
+                <div className="p-3 bg-purple-100 rounded-2xl text-purple-600 animate-bounce">
+                  <Sparkles size={24} />
+                </div>
+                <p className="text-sm font-black text-purple-600 uppercase tracking-tighter">
+                  AI 고스트라이터가 초안을 작성 중입니다...
+                </p>
+              </div>
+            </div>
+          )}
           <textarea
             {...register("body", { required: true })}
             rows={10}
